@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -52,6 +54,10 @@ import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.sin
+import android.provider.Settings
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 class MainActivity : ComponentActivity() {
 
@@ -126,11 +132,30 @@ class MainActivity : ComponentActivity() {
 
     private fun setupAndStartListening() {
         if (!mainViewModel.isVoiceEnabled.value) return
+        
+        // CRITICAL CONCURRENCY PROTECTION:
+        // Do not listen locally in MainActivity if the Background Accessibility Service is active and listening!
+        if (VoiceReelsAccessibilityService.isServiceRunning && VoiceReelsAccessibilityService.isVoiceControlActive) {
+            mainViewModel.setVoiceStatus("System Assistant Active")
+            stopSpeechListening()
+            return
+        }
+
         try {
-            speechRecognizer?.destroy()
-            
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-                setRecognitionListener(createSpeechListener())
+            // Ensure action runs on the main thread
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                Handler(Looper.getMainLooper()).post { setupAndStartListening() }
+                return
+            }
+
+            if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                return
+            }
+
+            if (speechRecognizer == null) {
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+                    setRecognitionListener(createSpeechListener())
+                }
             }
 
             if (recognizerIntent == null) {
@@ -150,6 +175,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopSpeechListening() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { stopSpeechListening() }
+            return
+        }
         try {
             speechRecognizer?.stopListening()
             speechRecognizer?.destroy()
@@ -192,10 +221,13 @@ class MainActivity : ComponentActivity() {
                 }
                 mainViewModel.setVoiceStatus(explanation)
 
+                // Use gentle sleep/retry delays to avoid burning main thread / binder limits
+                val delayTime = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 3000L else 2000L
+
                 // Restart auto-listen loop on silence / mismatch to remain fully hands-free
                 lifecycleScope.launch {
-                    delay(1200)
-                    if (mainViewModel.isVoiceEnabled.value) {
+                    delay(delayTime)
+                    if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && mainViewModel.isVoiceEnabled.value) {
                          setupAndStartListening()
                     }
                 }
@@ -209,8 +241,8 @@ class MainActivity : ComponentActivity() {
 
                 // Restart continuous listening
                 lifecycleScope.launch {
-                    delay(400)
-                    if (mainViewModel.isVoiceEnabled.value) {
+                    delay(1200)
+                    if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && mainViewModel.isVoiceEnabled.value) {
                         setupAndStartListening()
                     }
                 }
@@ -225,6 +257,18 @@ class MainActivity : ComponentActivity() {
 
             override fun onEvent(eventType: Int, params: Bundle?) {}
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::mainViewModel.isInitialized && mainViewModel.isVoiceEnabled.value) {
+            checkPermissionsAndListen()
+        }
+    }
+
+    override fun onPause() {
+        stopSpeechListening()
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -259,6 +303,22 @@ fun VoiceReelsApp(
 
     LaunchedEffect(currentIndex, voiceEnabled) {
         hasMicPermission.value = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    }
+
+    var activeTab by remember { mutableStateOf("home") }
+    var isServiceEnabled by remember { mutableStateOf(VoiceReelsAccessibilityService.isServiceRunning) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isServiceEnabled = VoiceReelsAccessibilityService.isServiceRunning
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     Column(
@@ -305,7 +365,7 @@ fun VoiceReelsApp(
             }
         }
 
-        // 2. Video Player Frame block
+        // 2. Screen Content block
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -315,7 +375,20 @@ fun VoiceReelsApp(
                 .background(Color(0xFF0F172A)) // Slate 900
                 .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(32.dp))
         ) {
-            if (currentReel != null) {
+            if (activeTab == "explore") {
+                GlobalAssistantScreen(
+                    context = context,
+                    isServiceEnabled = isServiceEnabled,
+                    onActivateClick = {
+                        try {
+                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Please open Settings -> Accessibility manually", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                )
+            } else if (currentReel != null) {
                 var totalDragY by remember { mutableStateOf(0f) }
                 
                 Box(
@@ -932,7 +1005,9 @@ fun VoiceReelsApp(
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.clickable { }
+                modifier = Modifier
+                    .clickable { activeTab = "home" }
+                    .alpha(if (activeTab == "home") 1f else 0.5f)
             ) {
                 Icon(
                     imageVector = Icons.Filled.Home,
@@ -952,19 +1027,17 @@ fun VoiceReelsApp(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier
-                    .clickable { 
-                        Toast.makeText(context, "Explore page placeholder", Toast.LENGTH_SHORT).show()
-                    }
-                    .alpha(0.5f)
+                    .clickable { activeTab = "explore" }
+                    .alpha(if (activeTab == "explore") 1f else 0.5f)
             ) {
                 Icon(
-                    imageVector = Icons.Filled.Search,
-                    contentDescription = "Search active explore menu",
+                    imageVector = Icons.Filled.Explore,
+                    contentDescription = "System voice assistant configuration",
                     tint = Color.White,
                     modifier = Modifier.size(24.dp)
                 )
                 Text(
-                    text = "Explore",
+                    text = "Assistant",
                     color = Color.White,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium
@@ -1323,5 +1396,242 @@ fun formatNumber(num: Int): String {
             "${thousands}K"
         }
         else -> num.toString()
+    }
+}
+
+@Composable
+fun GlobalAssistantScreen(
+    context: android.content.Context,
+    isServiceEnabled: Boolean,
+    onActivateClick: () -> Unit
+) {
+    val prefs = remember { context.getSharedPreferences("voice_reels_prefs", android.content.Context.MODE_PRIVATE) }
+    var globalVoiceEnabled by remember {
+        mutableStateOf(prefs.getBoolean("global_voice_control_enabled", false))
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = "System-Wide Assistant",
+            color = Color.White,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 2.dp)
+        )
+        Text(
+            text = "Control any shorts or reels app completely hands-free using simple spoken voice triggers.",
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 12.sp,
+            lineHeight = 17.sp
+        )
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (isServiceEnabled) Color(0xFF065F46).copy(alpha = 0.8f) else Color(0xFF1E293B)
+            ),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(
+                    1.dp,
+                    if (isServiceEnabled) Color(0xFF34D399).copy(alpha = 0.3f) else Color.White.copy(alpha = 0.05f),
+                    RoundedCornerShape(20.dp)
+                )
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(if (isServiceEnabled) Color(0xFF34D399) else Color(0xFFF87171))
+                    )
+                    Text(
+                        text = if (isServiceEnabled) "ACCESSIBILITY: ACTIVE" else "ACCESSIBILITY: INACTIVE",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Text(
+                    text = if (isServiceEnabled) {
+                        "Voice Reels is active. Enable 'System Background Listening' below, open TikTok or YouTube, and use your voice commands!"
+                    } else {
+                        "Android requires an Accessibility Service permission to perform gestures (swipes) on your behalf over other media apps system-wide."
+                    },
+                    color = Color.White.copy(alpha = 0.8f),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+
+                Button(
+                    onClick = onActivateClick,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isServiceEnabled) Color.White.copy(alpha = 0.2f) else Color.White,
+                        contentColor = if (isServiceEnabled) Color.White else Color.Black
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                ) {
+                    Text(
+                        text = if (isServiceEnabled) "Configure Accessibility Settings" else "Enable Voice Assistant",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(20.dp))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "System Background Listening",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = "Let the voice recognition engine run in the background to capture swipe commands over other apps.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+                
+                Spacer(modifier = Modifier.width(12.dp))
+                
+                Switch(
+                    checked = globalVoiceEnabled,
+                    onCheckedChange = { checked ->
+                        prefs.edit().putBoolean("global_voice_control_enabled", checked).apply()
+                        globalVoiceEnabled = checked
+                        VoiceReelsAccessibilityService.isVoiceControlActive = checked
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF38BDF8),
+                        checkedTrackColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
+                    )
+                )
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(20.dp))
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Supported Hands-Free Feeds",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp)
+                ) {
+                    val apps = listOf("TikTok", "YouTube", "Instagram", "Facebook")
+                    apps.forEach { app ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF1E293B))
+                                .padding(vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = app,
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(20.dp))
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Universal Voice Commands",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                
+                val commands = listOf(
+                    Pair("🗣️ Next / Down / Skip", "Swipe to the next short or reel video"),
+                    Pair("🗣️ Prev / Back / Up", "Swipe up to the previous video"),
+                    Pair("🗣️ Pause / Play / Stop", "Tap on the screen center to toggle state"),
+                    Pair("🗣️ Like / Love / Heart", "Inject double tap gesture to like post")
+                )
+                
+                commands.forEach { (cmd, desc) ->
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = cmd,
+                            color = Color(0xFF38BDF8),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = desc,
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 11.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                }
+            }
+        }
     }
 }

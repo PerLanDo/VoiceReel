@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Voice Reels</string>
+    <string name="accessibility_desc">Enables hands-free voice scrolling system-wide on apps like TikTok, YouTube, Instagram, and Facebook.</string>
 </resources>
