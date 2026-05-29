@@ -1397,15 +1397,12 @@ fun DrawScope.drawCoderCanvas(time: Float) {
 }
 
 fun formatNumber(num: Int): String {
+    fun trimZero(value: Float): String =
+        if (value % 1f == 0f) value.toInt().toString() else value.toString()
+
     return when {
-        num >= 1000000 -> {
-            val millions = (num / 100000) / 10f
-            "${millions}M"
-        }
-        num >= 1000 -> {
-            val thousands = (num / 100) / 10f
-            "${thousands}K"
-        }
+        num >= 1_000_000 -> "${trimZero((num / 100_000) / 10f)}M"
+        num >= 1_000 -> "${trimZero((num / 100) / 10f)}K"
         else -> num.toString()
     }
 }
