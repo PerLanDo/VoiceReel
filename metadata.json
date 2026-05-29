@@ -2,5 +2,5 @@
   "name": "Voice Reels",
   "description": "A clean minimalist TikTok / social media reels simulator controlled entirely hands-free via voice commands.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }
