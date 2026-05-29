@@ -9,6 +9,8 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -263,6 +265,15 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (::mainViewModel.isInitialized && mainViewModel.isVoiceEnabled.value) {
             checkPermissionsAndListen()
+        }
+        val prefs = getSharedPreferences("voice_reels_prefs", MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val hasPerm = Settings.canDrawOverlays(this)
+            val showOverlay = prefs.getBoolean("show_floating_overlay", false)
+            if (showOverlay && !hasPerm) {
+                prefs.edit().putBoolean("show_floating_overlay", false).apply()
+                VoiceReelsAccessibilityService.isOverlayEnabled = false
+            }
         }
     }
 
@@ -1409,6 +1420,12 @@ fun GlobalAssistantScreen(
     var globalVoiceEnabled by remember {
         mutableStateOf(prefs.getBoolean("global_voice_control_enabled", false))
     }
+    var muteVoiceBeeps by remember {
+        mutableStateOf(prefs.getBoolean("mute_voice_beeps", true))
+    }
+    var showFloatingOverlay by remember {
+        mutableStateOf(prefs.getBoolean("show_floating_overlay", false))
+    }
 
     Column(
         modifier = Modifier
@@ -1551,6 +1568,115 @@ fun GlobalAssistantScreen(
                 .fillMaxWidth()
                 .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(20.dp))
         ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Silence Voice Beeps",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = "Mute annoying system beep and ding sounds that play whenever standard speech recognition activates.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+                
+                Spacer(modifier = Modifier.width(12.dp))
+                
+                Switch(
+                    checked = muteVoiceBeeps,
+                    onCheckedChange = { checked ->
+                        prefs.edit().putBoolean("mute_voice_beeps", checked).apply()
+                        muteVoiceBeeps = checked
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF38BDF8),
+                        checkedTrackColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
+                    )
+                )
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(20.dp))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Floating Controls Bubble",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = "Show a drag-and-drop floating widget over other apps to configure listening or tap controls hands-free.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+                
+                Spacer(modifier = Modifier.width(12.dp))
+                
+                Switch(
+                    checked = showFloatingOverlay,
+                    onCheckedChange = { checked ->
+                        if (checked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+                            Toast.makeText(context, "Grant 'Display over other apps' permissions first!", Toast.LENGTH_LONG).show()
+                            try {
+                                val intent = Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
+                                )
+                                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                context.startActivity(intent)
+                            }
+                        } else {
+                            prefs.edit().putBoolean("show_floating_overlay", checked).apply()
+                            showFloatingOverlay = checked
+                            VoiceReelsAccessibilityService.isOverlayEnabled = checked
+                        }
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF38BDF8),
+                        checkedTrackColor = Color(0xFF38BDF8).copy(alpha = 0.3f)
+                    )
+                )
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(20.dp))
+        ) {
             Column(
                 modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1568,18 +1694,41 @@ fun GlobalAssistantScreen(
                         .fillMaxWidth()
                         .padding(top = 4.dp)
                 ) {
-                    val apps = listOf("TikTok", "YouTube", "Instagram", "Facebook")
-                    apps.forEach { app ->
+                    val apps = listOf(
+                        Triple("TikTok", "com.zhiliaoapp.musically", "https://www.tiktok.com"),
+                        Triple("YouTube", "com.google.android.youtube", "https://www.youtube.com/shorts"),
+                        Triple("Instagram", "com.instagram.android", "https://www.instagram.com/reels"),
+                        Triple("Facebook", "com.facebook.katana", "https://www.facebook.com/reels")
+                    )
+                    apps.forEach { (appName, appPkg, appUrl) ->
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(Color(0xFF1E293B))
-                                .padding(vertical = 6.dp),
+                                .clickable {
+                                    val pm = context.packageManager
+                                    var intent = pm.getLaunchIntentForPackage(appPkg)
+                                    if (intent == null && appName == "TikTok") {
+                                        intent = pm.getLaunchIntentForPackage("com.ss.android.ugc.aweme")
+                                    }
+                                    try {
+                                        if (intent != null) {
+                                            context.startActivity(intent)
+                                        } else {
+                                            val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse(appUrl))
+                                            webIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                            context.startActivity(webIntent)
+                                        }
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Could not open $appName", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                .padding(vertical = 10.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = app,
+                                text = appName,
                                 color = Color.White,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold
