@@ -689,7 +689,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             })
             container.addView(TextView(context).apply {
                 text = "✕"
-                textSize = 10f
+                textSize = 14f
                 setTextColor(BUBBLE_CLOSE_TEXT_COLOR)
                 contentDescription = "Close floating bubble"
                 isClickable = true

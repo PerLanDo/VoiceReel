@@ -642,7 +642,7 @@ private fun launchApp(context: Context, app: AppEntry) {
             else -> false
         }
         if (!launched) {
-            error("Unable to launch ${app.name}: no compatible activity handler found")
+            error("Unable to launch ${app.name}: app not available or cannot handle this content")
         }
     }.onFailure {
         Toast.makeText(context, "Could not open ${app.name}", Toast.LENGTH_SHORT).show()
