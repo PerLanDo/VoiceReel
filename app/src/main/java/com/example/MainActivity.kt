@@ -3,6 +3,7 @@ package com.example
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -194,6 +195,19 @@ private fun ControlCenter(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    DisposableEffect(prefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
+            when (key) {
+                "global_voice_control_enabled" ->
+                    voiceControl = sharedPreferences.getBoolean(key, false)
+                "show_floating_overlay" ->
+                    overlay = sharedPreferences.getBoolean(key, false)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
     val ready = micGranted && serviceRunning

@@ -133,14 +133,21 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var panelParams: WindowManager.LayoutParams? = null
     private var listeningSwitch: Switch? = null
     private var silenceSwitch: Switch? = null
+    private var overlaySwitch: Switch? = null
 
     private val preferenceListener =
         SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
             when (key) {
-                "global_voice_control_enabled" ->
-                    isVoiceControlActive = sharedPreferences.getBoolean(key, false)
-                "show_floating_overlay" ->
-                    toggleOverlay(sharedPreferences.getBoolean(key, false))
+                "global_voice_control_enabled" -> {
+                    val enabled = sharedPreferences.getBoolean(key, false)
+                    if (isVoiceControlActive != enabled) isVoiceControlActive = enabled
+                    handler.post { listeningSwitch?.isChecked = enabled }
+                }
+                "show_floating_overlay" -> {
+                    val enabled = sharedPreferences.getBoolean(key, false)
+                    if (isOverlayEnabled != enabled) isOverlayEnabled = enabled
+                    handler.post { overlaySwitch?.isChecked = enabled }
+                }
             }
         }
 
@@ -642,6 +649,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
             val prefs = prefs()
 
+            val overlayVisible = prefs.getBoolean("show_floating_overlay", false)
+
             root.addView(switchRow("Voice control", isVoiceControlActive) { checked ->
                 prefs.edit().putBoolean("global_voice_control_enabled", checked).apply()
                 isVoiceControlActive = checked
@@ -651,6 +660,11 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 prefs.edit().putBoolean("mute_voice_beeps", checked).apply()
                 if (!checked) restoreSystemSounds()
             }.also { silenceSwitch = it.second }.first)
+
+            root.addView(switchRow("Floating bubble", overlayVisible) { checked ->
+                prefs.edit().putBoolean("show_floating_overlay", checked).apply()
+                isOverlayEnabled = checked
+            }.also { overlaySwitch = it.second }.first)
 
             root.addView(divider())
             root.addView(TextView(context).apply {
@@ -793,8 +807,10 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
         panelParams?.x = bubbleParams?.x ?: 100
         panelParams?.y = (bubbleParams?.y ?: 300) + (bubbleView?.height ?: dp(50)) + dp(8)
+        val prefs = prefs()
         listeningSwitch?.isChecked = isVoiceControlActive
-        silenceSwitch?.isChecked = prefs().getBoolean("mute_voice_beeps", true)
+        silenceSwitch?.isChecked = prefs.getBoolean("mute_voice_beeps", true)
+        overlaySwitch?.isChecked = prefs.getBoolean("show_floating_overlay", false)
         runCatching { wm.addView(panelView, panelParams) }
     }
 
