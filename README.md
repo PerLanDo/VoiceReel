@@ -106,7 +106,9 @@ Under **Listening & performance** you can fine-tune behavior:
 - **Repeat protection** — how long the same command is suppressed after firing (1s / 2s / 3s).
 - **Lower video volume while listening** (on by default) — focus + direct media attenuation for loud feeds.
 - **Silence recognition beeps** — mutes the system beeps that play when listening starts.
-- **Floating controls bubble** — a draggable, always-on-top widget with manual buttons.
+- **Floating controls bubble** — a draggable, always-on-top widget with manual buttons. Tap the
+  bubble to open its panel: turn **Voice control** on or off without opening this app, or switch
+  **Floating bubble** off to hide the widget entirely.
 
 Then open TikTok, Instagram Reels, Facebook Reels, or YouTube Shorts (the home screen has quick
 launch buttons) and use the voice commands.
