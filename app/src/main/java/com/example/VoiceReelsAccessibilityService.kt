@@ -47,10 +47,10 @@ import java.util.Locale
  * where possible, real "like" button clicks) on whatever short-video app is in the foreground —
  * TikTok, Instagram Reels, Facebook Reels or YouTube Shorts.
  *
- * To stay responsive while a video is playing it:
- *  - ducks the foreground app's audio while listening (so the mic mostly hears you),
- *  - prefers fast on-device recognition, and
- *  - acts on *partial* results the instant a command-like word is detected.
+ * To stay responsive while a video is playing it ducks the foreground app's audio while listening,
+ * prefers fast on-device recognition, and acts on *partial* results. To avoid accidentally
+ * repeating an action when a word is heard several times, each command is rate-limited by a
+ * configurable cooldown.
  */
 class VoiceReelsAccessibilityService : AccessibilityService() {
 
@@ -65,9 +65,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             PKG_TIKTOK, PKG_TIKTOK_ALT, PKG_YOUTUBE, PKG_INSTAGRAM, PKG_FACEBOOK
         )
 
-        // How long the same command is suppressed after firing, to avoid double-triggering from
-        // the partial-then-final result of a single utterance.
-        private const val COMMAND_COOLDOWN_MS = 1100L
+        const val PREF_COMMAND_COOLDOWN_MS = "command_cooldown_ms"
+
+        // Default time the *same* command is suppressed after firing, so repeating a word
+        // (e.g. "next … next … next") only acts once. User-adjustable in the UI.
+        const val DEFAULT_COMMAND_COOLDOWN_MS = 2000L
+
+        // A *different* command can follow much sooner, so "next" then "like" still feels snappy.
+        private const val DIFFERENT_COMMAND_COOLDOWN_MS = 500L
 
         // Restart cadence — kept short so listening feels continuous and snappy.
         private const val RESTART_AFTER_RESULT_MS = 200L
@@ -221,15 +226,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            // Several hypotheses give the fuzzy matcher more to work with.
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-            // Favor the fast, network-free on-device engine when available.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             }
-            // Finalize quickly so short single-word commands return fast.
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
             putExtra(
@@ -302,7 +304,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
-    /** Returns true if a command was fired from the given results bundle. */
+    /** Returns true if the speech contained a recognizable command (whether or not it acted). */
     private fun tryFireFrom(results: Bundle?): Boolean {
         if (utteranceConsumed) return false
         val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -315,23 +317,58 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     private fun fireCommand(command: VoiceCommand, heard: String) {
         val now = SystemClock.elapsedRealtime()
-        if (command == lastFiredCommand && now - lastFiredAt < COMMAND_COOLDOWN_MS) return
-        lastFiredCommand = command
-        lastFiredAt = now
-        utteranceConsumed = true
-
-        when (command) {
-            VoiceCommand.NEXT -> { announce("Next ⬇️", heard); swipeUp() }
-            VoiceCommand.PREVIOUS -> { announce("Previous ⬆️", heard); swipeDown() }
-            VoiceCommand.PLAY_PAUSE -> { announce("Play / Pause ⏯️", heard); performTap() }
-            VoiceCommand.LIKE -> { announce("Like ❤️", heard); doLike() }
-            VoiceCommand.NONE -> {}
+        val sameCommand = command == lastFiredCommand
+        val cooldown = if (sameCommand) commandCooldownMs() else DIFFERENT_COMMAND_COOLDOWN_MS
+        if (now - lastFiredAt < cooldown) {
+            // Within the cooldown window: swallow the repeat so we don't act twice.
+            utteranceConsumed = true
+            return
         }
+
+        utteranceConsumed = true
+        val performed = perform(command, heard)
+        if (performed) {
+            lastFiredCommand = command
+            lastFiredAt = now
+        }
+    }
+
+    /** Performs the command; returns true if an actual gesture was dispatched. */
+    private fun perform(command: VoiceCommand, heard: String): Boolean = when (command) {
+        VoiceCommand.NEXT -> { announce("Next ⬇️", heard); swipeUp(); true }
+        VoiceCommand.PREVIOUS -> { announce("Previous ⬆️", heard); swipeDown(); true }
+        VoiceCommand.LIKE -> { announce("Like ❤️", heard); doLike(); true }
+        VoiceCommand.PLAY ->
+            if (isVideoPlaying()) {
+                info("Already playing")
+                false
+            } else {
+                announce("Play ▶️", heard); performTap(); true
+            }
+        VoiceCommand.PAUSE ->
+            if (isVideoPlaying()) {
+                announce("Pause ⏸️", heard); performTap(); true
+            } else {
+                info("Already paused")
+                false
+            }
+        VoiceCommand.NONE -> false
+    }
+
+    /** Best-effort check of whether the foreground app is currently playing audio/video. */
+    private fun isVideoPlaying(): Boolean = try {
+        (getSystemService(Context.AUDIO_SERVICE) as AudioManager).isMusicActive
+    } catch (e: Exception) {
+        false
     }
 
     private fun announce(action: String, heard: String) {
         _lastCommand.value = if (heard.isBlank()) action else "$action  ·  \"$heard\""
         showMatchToast(action)
+    }
+
+    private fun info(message: String) {
+        _lastCommand.value = message
     }
 
     // endregion
@@ -624,7 +661,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             })
 
             root.addView(buttonRow("Prev ⬆️", { swipeDown() }, "Next ⬇️", { swipeUp() }))
-            root.addView(buttonRow("Play ⏯️", { performTap() }, "Like ❤️", { doLike() }))
+            root.addView(buttonRow("Tap ⏯️", { performTap() }, "Like ❤️", { doLike() }))
 
             panelView = root
         }
@@ -765,6 +802,9 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     private fun prefs(): SharedPreferences =
         getSharedPreferences("voice_reels_prefs", Context.MODE_PRIVATE)
+
+    private fun commandCooldownMs(): Long =
+        prefs().getInt(PREF_COMMAND_COOLDOWN_MS, DEFAULT_COMMAND_COOLDOWN_MS.toInt()).toLong()
 
     override fun onDestroy() {
         _isRunning.value = false

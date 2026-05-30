@@ -174,6 +174,14 @@ private fun ControlCenter(
     var duckAudio by remember {
         mutableStateOf(prefs.getBoolean("duck_media_audio", true))
     }
+    var cooldownMs by remember {
+        mutableStateOf(
+            prefs.getInt(
+                VoiceReelsAccessibilityService.PREF_COMMAND_COOLDOWN_MS,
+                VoiceReelsAccessibilityService.DEFAULT_COMMAND_COOLDOWN_MS.toInt()
+            )
+        )
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -259,6 +267,15 @@ private fun ControlCenter(
         CommandReference()
 
         SectionTitle("Listening & performance")
+        CooldownSelector(
+            cooldownMs = cooldownMs,
+            onSelect = { value ->
+                cooldownMs = value
+                prefs.edit()
+                    .putInt(VoiceReelsAccessibilityService.PREF_COMMAND_COOLDOWN_MS, value)
+                    .apply()
+            }
+        )
         OptionToggle(
             title = "Lower video volume while listening",
             description = "Ducks the video's audio so the mic hears you clearly over playback. " +
@@ -446,7 +463,8 @@ private fun CommandReference() {
     val commands = listOf(
         "“Next”, “Down”, “Skip”" to "Scroll to the next video",
         "“Previous”, “Back”, “Up”" to "Scroll to the previous video",
-        "“Play”, “Pause”, “Stop”" to "Tap center to toggle playback",
+        "“Play”, “Resume”" to "Resume — only if the video is paused",
+        "“Pause”, “Stop”" to "Pause — only if the video is playing",
         "“Like”, “Love”, “Heart”" to "Like the current video"
     )
     Card {
@@ -462,6 +480,52 @@ private fun CommandReference() {
                 color = Muted,
                 fontSize = 11.sp
             )
+        }
+    }
+}
+
+@Composable
+private fun CooldownSelector(cooldownMs: Int, onSelect: (Int) -> Unit) {
+    val options = listOf(1000 to "1s", 2000 to "2s", 3000 to "3s")
+    Card {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Repeat protection", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "How long to wait before the same command can fire again. Prevents repeating an " +
+                    "action when a word is heard several times.",
+                color = Muted,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                options.forEach { (value, label) ->
+                    val selected = cooldownMs == value
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) AccentBlue else SurfaceAlt)
+                            .border(
+                                1.dp,
+                                if (selected) Accent else Color.White.copy(alpha = 0.06f),
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { onSelect(value) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                        )
+                    }
+                }
+            }
         }
     }
 }
