@@ -45,6 +45,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.sin
 import java.util.Locale
 
+private const val WAVE_RING_COUNT = 3
+
 /**
  * The heart of Voice Reels.
  *
@@ -143,14 +145,18 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         private const val LISTENING_WATCHDOG_CHECK_MS = 5000L
         private const val LISTENING_STALE_TIMEOUT_MS = 15000L
 
-        /** Fraction of the user's media volume while continuously listening. */
-        private const val LISTENING_VOLUME_FRACTION = 0.18f
+        /** While listening, media is muted so reel dialog/SFX cannot trigger commands. */
+        private const val LISTENING_VOLUME_LEVEL = 0
 
-        /** Cap during active speech — near-mute so loud reel audio cannot mask commands. */
-        private const val SPEECH_BURST_MAX_VOLUME = 1
+        /** Minimum confidence (0–1) for the top recognition hypothesis when scores are available. */
+        private const val MIN_RECOGNITION_CONFIDENCE = 0.45f
+
+        /** How long after detected user speech partial/final results remain eligible. */
+        private const val USER_SPEECH_WINDOW_MS = 1800L
+
+        /** Re-apply media mute if a foreground app raises volume while we are listening. */
+        private const val MEDIA_VOLUME_WATCHDOG_MS = 750L
         
-        // Floating bubble animation and display constants
-        private const val WAVE_RING_COUNT = 3
         private const val COMMAND_DISPLAY_DURATION_MS = 3000L
         private const val COMMAND_POLL_INTERVAL_MS = 100L
 
@@ -195,6 +201,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var utteranceConsumed = false
     private var lastFiredCommand = VoiceCommand.NONE
     private var lastFiredAt = 0L
+    private var userSpeechActive = false
+    private var lastUserSpeechAt = 0L
 
     // Audio isolation (focus + direct media volume attenuation).
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -215,7 +223,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hasAudioFocus = true
-                refreshMediaVolumeIsolation(speechBurstAttenuation)
+                refreshMediaVolumeIsolation(forceMute = true)
             }
         }
     }
@@ -235,6 +243,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     private val restartListeningRunnable = Runnable {
         if (isVoiceControlActive && _isRunning.value) startListening()
+    }
+
+    private val mediaVolumeWatchdogRunnable = object : Runnable {
+        override fun run() {
+            if (!isVoiceControlActive || !_isRunning.value || !mediaIsolationEnabled()) return
+            refreshMediaVolumeIsolation(forceMute = true)
+            scheduleMediaVolumeWatchdog()
+        }
     }
 
     private val listeningWatchdogRunnable = object : Runnable {
@@ -268,6 +284,18 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                     val enabled = sharedPreferences.getBoolean(key, false)
                     if (isOverlayEnabled != enabled) isOverlayEnabled = enabled
                     handler.post { overlaySwitch?.isChecked = enabled }
+                }
+                "duck_media_audio" -> {
+                    val enabled = sharedPreferences.getBoolean(key, true)
+                    handler.post {
+                        if (enabled && isVoiceControlActive && _isRunning.value) {
+                            acquireAudioDucking()
+                            scheduleMediaVolumeWatchdog()
+                        } else {
+                            handler.removeCallbacks(mediaVolumeWatchdogRunnable)
+                            releaseMediaVolumeIsolation()
+                        }
+                    }
                 }
             }
         }
@@ -329,6 +357,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
         muteSystemSoundsIfRequested()
         acquireAudioDucking()
+        scheduleMediaVolumeWatchdog()
 
         try {
             if (speechRecognizer == null) {
@@ -387,7 +416,10 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
         handler.removeCallbacks(restartListeningRunnable)
         handler.removeCallbacks(listeningWatchdogRunnable)
+        handler.removeCallbacks(mediaVolumeWatchdogRunnable)
         lastRecognizerActivityAt = 0L
+        userSpeechActive = false
+        lastUserSpeechAt = 0L
         resetRecognizer()
         _isListening.value = false
         if (_isRunning.value) _status.value = "Paused"
@@ -408,6 +440,30 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun scheduleMediaVolumeWatchdog() {
+        handler.removeCallbacks(mediaVolumeWatchdogRunnable)
+        if (isVoiceControlActive && _isRunning.value && mediaIsolationEnabled()) {
+            handler.postDelayed(mediaVolumeWatchdogRunnable, MEDIA_VOLUME_WATCHDOG_MS)
+        }
+    }
+
+    private fun markUserSpeech() {
+        val now = SystemClock.elapsedRealtime()
+        userSpeechActive = true
+        lastUserSpeechAt = now
+    }
+
+    private fun withinUserSpeechWindow(): Boolean {
+        if (userSpeechActive) return true
+        val last = lastUserSpeechAt
+        return last > 0L && SystemClock.elapsedRealtime() - last <= USER_SPEECH_WINDOW_MS
+    }
+
+    private fun isSupportedForegroundApp(): Boolean {
+        val pkg = currentPackage ?: return false
+        return pkg in SUPPORTED_PACKAGES
+    }
+
     private fun markRecognizerActivity() {
         lastRecognizerActivityAt = SystemClock.elapsedRealtime()
     }
@@ -426,24 +482,26 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         override fun onReadyForSpeech(params: Bundle?) {
             markRecognizerActivity()
             utteranceConsumed = false
+            userSpeechActive = false
             speechBurstAttenuation = false
-            refreshMediaVolumeIsolation(deepDip = false)
+            refreshMediaVolumeIsolation(forceMute = true)
             _status.value = "Listening…"
         }
 
         override fun onBeginningOfSpeech() {
             markRecognizerActivity()
+            markUserSpeech()
             speechBurstAttenuation = true
-            refreshMediaVolumeIsolation(deepDip = true)
+            refreshMediaVolumeIsolation(forceMute = true)
             _status.value = "Hearing you…"
         }
 
         override fun onRmsChanged(rmsdB: Float) {
             markRecognizerActivity()
-            // While the user is speaking, keep video audio ducked to the floor so dialog/SFX
-            // in the reel does not drown out the command.
-            if (speechBurstAttenuation && rmsdB > 2f) {
-                refreshMediaVolumeIsolation(deepDip = true)
+            // Treat sustained mic energy as user speech so commands are not taken from reel audio.
+            if (rmsdB > 2f) {
+                markUserSpeech()
+                refreshMediaVolumeIsolation(forceMute = true)
             }
         }
 
@@ -451,7 +509,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         override fun onEndOfSpeech() {
             markRecognizerActivity()
             speechBurstAttenuation = false
-            refreshMediaVolumeIsolation(deepDip = false)
+            refreshMediaVolumeIsolation(forceMute = true)
             _status.value = "Processing…"
         }
 
@@ -477,8 +535,11 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 val first = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
-                if (!first.isNullOrBlank()) _lastCommand.value = "\"$first\""
+                if (!first.isNullOrBlank() && withinUserSpeechWindow()) {
+                    _lastCommand.value = "\"$first\""
+                }
             }
+            userSpeechActive = false
             _isListening.value = false
             scheduleRestart(RESTART_AFTER_RESULT_MS)
         }
@@ -489,9 +550,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     /** Returns true if the speech contained a recognizable command (whether or not it acted). */
     private fun tryFireFrom(results: Bundle?): Boolean {
         if (utteranceConsumed) return false
+        if (!withinUserSpeechWindow()) return false
+        if (!isSupportedForegroundApp()) return false
         val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             ?: return false
-        val command = VoiceCommandParser.parse(candidates)
+        val confidences = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.toList()
+        val command = VoiceCommandParser.parse(candidates, confidences, MIN_RECOGNITION_CONFIDENCE)
         if (command == VoiceCommand.NONE) return false
         fireCommand(command, candidates.firstOrNull().orEmpty())
         return true
@@ -566,8 +630,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     /**
      * Two-layer strategy for loud foreground video:
      * 1. Transient audio focus (cooperative duck — works on some apps only).
-     * 2. Direct [STREAM_MUSIC] attenuation from the saved user volume (reliable on TikTok/Reels).
-     * During active speech we dip even lower so reel dialog/SFX cannot mask commands.
+     * 2. Direct [STREAM_MUSIC] mute from the saved user volume (reliable on TikTok/Reels).
+     * Video stays muted for the whole listening session so reel dialog cannot trigger commands.
      */
     private fun acquireAudioDucking() {
         if (!mediaIsolationEnabled()) return
@@ -597,13 +661,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             }
             hasAudioFocus = granted == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         }
-        refreshMediaVolumeIsolation(speechBurstAttenuation)
+        refreshMediaVolumeIsolation(forceMute = true)
     }
 
-    private fun refreshMediaVolumeIsolation(deepDip: Boolean) {
-        if (!mediaIsolationEnabled()) return
+    private fun refreshMediaVolumeIsolation(forceMute: Boolean) {
+        if (!mediaIsolationEnabled() || !forceMute) return
         val am = audioManager()
-        if (!deepDip && !am.isMusicActive) return
 
         val stream = AudioManager.STREAM_MUSIC
         if (savedMusicVolume < 0) {
@@ -612,16 +675,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         val maxVol = am.getStreamMaxVolume(stream)
         if (maxVol <= 0) return
 
-        val baseline = savedMusicVolume.coerceIn(0, maxVol)
-        val listeningTarget = maxOf(
-            1,
-            (baseline * LISTENING_VOLUME_FRACTION).toInt().coerceAtMost(baseline)
-        )
-        val target = if (deepDip) {
-            maxOf(0, minOf(listeningTarget, SPEECH_BURST_MAX_VOLUME))
-        } else {
-            listeningTarget
-        }
+        val target = LISTENING_VOLUME_LEVEL.coerceIn(0, maxVol)
 
         if (am.getStreamVolume(stream) != target) {
             am.setStreamVolume(stream, target, 0)

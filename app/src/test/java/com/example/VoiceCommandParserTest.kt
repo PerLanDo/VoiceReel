@@ -79,6 +79,24 @@ class VoiceCommandParserTest {
   }
 
   @Test
+  fun `embedded keywords in unrelated words are ignored`() {
+    assertEquals(VoiceCommand.NONE, VoiceCommandParser.parse("nonstop talking"))
+    assertEquals(VoiceCommand.NONE, VoiceCommandParser.parse("unlike this video"))
+  }
+
+  @Test
+  fun `low confidence candidates are ignored when scores are present`() {
+    assertEquals(
+      VoiceCommand.NONE,
+      VoiceCommandParser.parse(listOf("next"), listOf(0.2f), 0.45f)
+    )
+    assertEquals(
+      VoiceCommand.NEXT,
+      VoiceCommandParser.parse(listOf("next"), listOf(0.8f), 0.45f)
+    )
+  }
+
+  @Test
   fun `parsing is case insensitive`() {
     assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("NEXT"))
     assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("LiKe"))

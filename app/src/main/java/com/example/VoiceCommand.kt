@@ -20,9 +20,9 @@ enum class VoiceCommand(val displayName: String) {
 /**
  * Pure, side-effect-free parser that turns recognized speech into a [VoiceCommand].
  *
- * It is deliberately *sensitive*: in addition to exact keywords it understands common
- * mis-recognitions (homophones such as "necks" → next, "lake" → like) and applies a fuzzy
- * edit-distance fallback so near-misses still trigger.
+ * Matching is intentionally conservative: whole-word tokens first, then homophones, then fuzzy
+ * edit distance. Substring hits inside longer phrases (e.g. "like" in "I would like this") are
+ * ignored so reel dialog is less likely to trigger commands.
  */
 object VoiceCommandParser {
 
@@ -68,34 +68,72 @@ object VoiceCommandParser {
      * Parse against several recognition candidates (e.g. the top-N hypotheses from the
      * speech engine). The first candidate that yields a command wins.
      */
-    fun parse(candidates: List<String?>): VoiceCommand {
+    fun parse(candidates: List<String?>): VoiceCommand =
+        parse(candidates, confidences = null, minConfidence = 0f)
+
+    /**
+     * Parse with optional per-hypothesis confidence scores from [SpeechRecognizer].
+     * When scores are present, candidates below [minConfidence] are skipped.
+     */
+    fun parse(
+        candidates: List<String?>,
+        confidences: List<Float>?,
+        minConfidence: Float
+    ): VoiceCommand {
         val texts = candidates
             .filterNotNull()
             .map { it.lowercase().trim() }
             .filter { it.isNotEmpty() }
         if (texts.isEmpty()) return VoiceCommand.NONE
 
-        for (text in texts) {
+        for ((index, text) in texts.withIndex()) {
+            if (!passesConfidence(confidences, index, minConfidence)) continue
             exactMatch(text)?.let { return it }
         }
-        for (text in texts) {
+        for ((index, text) in texts.withIndex()) {
+            if (!passesConfidence(confidences, index, minConfidence)) continue
             fuzzyMatch(text)?.let { return it }
         }
         return VoiceCommand.NONE
     }
 
-    private fun tokens(text: String): Set<String> =
-        text.split(Regex("[^a-z]+")).filter { it.isNotEmpty() }.toSet()
+    private fun passesConfidence(
+        confidences: List<Float>?,
+        index: Int,
+        minConfidence: Float
+    ): Boolean {
+        if (confidences == null || minConfidence <= 0f) return true
+        val score = confidences.getOrNull(index) ?: return true
+        return score >= minConfidence
+    }
+
+    private fun tokens(text: String): List<String> =
+        text.split(Regex("[^a-z]+")).filter { it.isNotEmpty() }
 
     private fun exactMatch(text: String): VoiceCommand? {
         val words = tokens(text)
+        val wordSet = words.toSet()
         for (group in groups) {
-            if (group.keywords.any { it in words || text.contains(it) }) return group.command
+            if (group.keywords.any { keyword ->
+                    keyword in wordSet || matchesStandaloneKeyword(text, keyword)
+                }
+            ) {
+                return group.command
+            }
         }
         for (word in words) {
             homophones[word]?.let { return it }
         }
         return null
+    }
+
+    /**
+     * Accept short imperative phrases such as "go next" without matching substrings inside
+     * unrelated words (e.g. "nonstop" must not match "stop").
+     */
+    private fun matchesStandaloneKeyword(text: String, keyword: String): Boolean {
+        if (keyword.length < 4) return false
+        return Regex("\\b${Regex.escape(keyword)}\\b").containsMatchIn(text)
     }
 
     private fun fuzzyMatch(text: String): VoiceCommand? {
