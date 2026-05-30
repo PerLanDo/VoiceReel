@@ -694,6 +694,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 contentDescription = "Close floating bubble"
                 isClickable = true
                 isFocusable = true
+                setOnClickListener { dismissFloatingOverlay() }
                 gravity = Gravity.CENTER
                 setPadding(dp(4), dp(2), dp(4), dp(2))
                 layoutParams = FrameLayout.LayoutParams(
