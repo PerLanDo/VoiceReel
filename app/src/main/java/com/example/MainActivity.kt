@@ -452,12 +452,12 @@ private fun SupportedApps() {
         AppEntry(
             "TikTok",
             VoiceReelsAccessibilityService.PKG_TIKTOK,
-            "https://www.tiktok.com/foryou",
+            "https://www.tiktok.com",
             VoiceReelsAccessibilityService.PKG_TIKTOK_ALT
         ),
         AppEntry("YouTube", VoiceReelsAccessibilityService.PKG_YOUTUBE, "https://www.youtube.com/shorts"),
-        AppEntry("Instagram", VoiceReelsAccessibilityService.PKG_INSTAGRAM, "https://www.instagram.com/reels/"),
-        AppEntry("Facebook", VoiceReelsAccessibilityService.PKG_FACEBOOK, "https://www.facebook.com/reel/")
+        AppEntry("Instagram", VoiceReelsAccessibilityService.PKG_INSTAGRAM, "https://www.instagram.com/reels"),
+        AppEntry("Facebook", VoiceReelsAccessibilityService.PKG_FACEBOOK, "https://www.facebook.com/reels")
     )
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         apps.forEach { app ->
@@ -617,7 +617,7 @@ private fun launchApp(context: Context, app: AppEntry) {
     runCatching {
         val launched = when {
             installedPkg != null -> {
-                val appIntent = Intent(deepLinkIntent).apply { `package` = installedPkg }
+                val appIntent = Intent(deepLinkIntent).setPackage(installedPkg)
                 when {
                     appIntent.resolveActivity(pm) != null -> {
                         context.startActivity(appIntent)
