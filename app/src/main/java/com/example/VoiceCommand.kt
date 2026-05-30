@@ -4,11 +4,15 @@ import kotlin.math.abs
 
 /**
  * The set of actions Voice Reels can perform on a foreground short-video app.
+ *
+ * PLAY and PAUSE are kept separate (rather than a single toggle) so the service can be
+ * state-aware: only pause when something is playing, only resume when it is paused.
  */
 enum class VoiceCommand(val displayName: String) {
     NEXT("Next"),
     PREVIOUS("Previous"),
-    PLAY_PAUSE("Play / Pause"),
+    PLAY("Play"),
+    PAUSE("Pause"),
     LIKE("Like"),
     NONE("");
 }
@@ -18,22 +22,22 @@ enum class VoiceCommand(val displayName: String) {
  *
  * It is deliberately *sensitive*: in addition to exact keywords it understands common
  * mis-recognitions (homophones such as "necks" → next, "lake" → like) and applies a fuzzy
- * edit-distance fallback so near-misses still trigger. This is what lets the assistant react
- * the instant a command-like word is heard, even on partial recognition results.
+ * edit-distance fallback so near-misses still trigger.
  */
 object VoiceCommandParser {
 
     private data class Group(val command: VoiceCommand, val keywords: List<String>)
 
-    // Order matters: the first group with a hit wins.
+    // Order matters: the first group with a hit wins. PLAY is listed before PAUSE so that
+    // "unpause" resolves to PLAY rather than substring-matching "pause".
     private val groups = listOf(
         Group(VoiceCommand.NEXT, listOf("next", "down", "skip", "forward")),
         Group(VoiceCommand.PREVIOUS, listOf("previous", "prev", "back", "up", "last", "rewind")),
         Group(VoiceCommand.LIKE, listOf("like", "love", "heart", "favorite", "favourite")),
-        Group(VoiceCommand.PLAY_PAUSE, listOf("pause", "play", "stop", "resume", "wait", "hold"))
+        Group(VoiceCommand.PLAY, listOf("play", "resume", "start", "continue", "unpause")),
+        Group(VoiceCommand.PAUSE, listOf("pause", "stop", "wait", "hold", "freeze"))
     )
 
-    // Frequent speech-to-text confusions for the short command words.
     private val homophones = mapOf(
         "necks" to VoiceCommand.NEXT,
         "text" to VoiceCommand.NEXT,
@@ -48,11 +52,10 @@ object VoiceCommandParser {
         "likes" to VoiceCommand.LIKE,
         "black" to VoiceCommand.PREVIOUS,
         "pack" to VoiceCommand.PREVIOUS,
-        "plate" to VoiceCommand.PLAY_PAUSE,
-        "played" to VoiceCommand.PLAY_PAUSE,
-        "plays" to VoiceCommand.PLAY_PAUSE,
-        "paws" to VoiceCommand.PLAY_PAUSE,
-        "post" to VoiceCommand.PLAY_PAUSE
+        "plate" to VoiceCommand.PLAY,
+        "paws" to VoiceCommand.PAUSE,
+        "pose" to VoiceCommand.PAUSE,
+        "pours" to VoiceCommand.PAUSE
     )
 
     private const val FUZZY_MIN_KEYWORD_LEN = 4

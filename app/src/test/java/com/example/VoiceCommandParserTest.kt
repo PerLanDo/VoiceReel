@@ -27,9 +27,16 @@ class VoiceCommandParserTest {
   }
 
   @Test
-  fun `play pause synonyms map to PLAY_PAUSE`() {
-    listOf("pause", "play", "stop", "resume", "wait", "hold on").forEach {
-      assertEquals("'$it'", VoiceCommand.PLAY_PAUSE, VoiceCommandParser.parse(it))
+  fun `pause synonyms map to PAUSE`() {
+    listOf("pause", "stop", "wait", "hold on", "freeze").forEach {
+      assertEquals("'$it'", VoiceCommand.PAUSE, VoiceCommandParser.parse(it))
+    }
+  }
+
+  @Test
+  fun `play synonyms map to PLAY`() {
+    listOf("play", "resume", "start", "continue", "unpause").forEach {
+      assertEquals("'$it'", VoiceCommand.PLAY, VoiceCommandParser.parse(it))
     }
   }
 
@@ -40,13 +47,14 @@ class VoiceCommandParserTest {
     assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("lake"))
     assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("bike"))
     assertEquals(VoiceCommand.PREVIOUS, VoiceCommandParser.parse("black"))
+    assertEquals(VoiceCommand.PAUSE, VoiceCommandParser.parse("paws"))
   }
 
   @Test
   fun `fuzzy matching catches near-miss words`() {
     assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("skipp"))
     assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("lik"))
-    assertEquals(VoiceCommand.PLAY_PAUSE, VoiceCommandParser.parse("pawse"))
+    assertEquals(VoiceCommand.PAUSE, VoiceCommandParser.parse("pawse"))
   }
 
   @Test
