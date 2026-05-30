@@ -13,6 +13,7 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -47,7 +48,8 @@ import java.util.Locale
  * where possible, real "like" button clicks) on whatever short-video app is in the foreground —
  * TikTok, Instagram Reels, Facebook Reels or YouTube Shorts.
  *
- * To stay responsive while a video is playing it ducks the foreground app's audio while listening,
+ * To stay responsive while a video is playing it isolates foreground audio (focus + media volume)
+ * while listening,
  * prefers fast on-device recognition, and acts on *partial* results. To avoid accidentally
  * repeating an action when a word is heard several times, each command is rate-limited by a
  * configurable cooldown.
@@ -78,6 +80,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         private const val RESTART_AFTER_RESULT_MS = 200L
         private const val RESTART_AFTER_ERROR_MS = 300L
         private const val RESTART_AFTER_BUSY_MS = 1000L
+
+        /** Fraction of the user's media volume while continuously listening. */
+        private const val LISTENING_VOLUME_FRACTION = 0.18f
+
+        /** Cap during active speech — near-mute so loud reel audio cannot mask commands. */
+        private const val SPEECH_BURST_MAX_VOLUME = 1
 
         private var instance: VoiceReelsAccessibilityService? = null
 
@@ -120,10 +128,29 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var lastFiredCommand = VoiceCommand.NONE
     private var lastFiredAt = 0L
 
-    // Audio ducking.
+    // Audio isolation (focus + direct media volume attenuation).
     private var audioFocusRequest: AudioFocusRequest? = null
     private var hasAudioFocus = false
     private var isQuietModeActive = false
+    private var savedMusicVolume = -1
+    private var mediaAttenuationActive = false
+    private var speechBurstAttenuation = false
+
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                hasAudioFocus = false
+                if (isVoiceControlActive && _isRunning.value) {
+                    handler.postDelayed({ acquireAudioDucking() }, 120L)
+                }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                hasAudioFocus = true
+                refreshMediaVolumeIsolation(speechBurstAttenuation)
+            }
+        }
+    }
 
     // Overlay components
     private var windowManager: WindowManager? = null
@@ -232,6 +259,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             }
+            // VOICE_COMMUNICATION enables hardware echo cancellation on many devices — critical
+            // when the phone speaker is playing loud video audio into the same mic path.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                putExtra(
+                    RecognizerIntent.EXTRA_AUDIO_SOURCE,
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                )
+            }
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
             putExtra(
@@ -268,13 +303,31 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private fun createSpeechListener(): RecognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
             utteranceConsumed = false
+            speechBurstAttenuation = false
+            refreshMediaVolumeIsolation(deepDip = false)
             _status.value = "Listening…"
         }
 
-        override fun onBeginningOfSpeech() { _status.value = "Hearing you…" }
-        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBeginningOfSpeech() {
+            speechBurstAttenuation = true
+            refreshMediaVolumeIsolation(deepDip = true)
+            _status.value = "Hearing you…"
+        }
+
+        override fun onRmsChanged(rmsdB: Float) {
+            // While the user is speaking, keep video audio ducked to the floor so dialog/SFX
+            // in the reel does not drown out the command.
+            if (speechBurstAttenuation && rmsdB > 2f) {
+                refreshMediaVolumeIsolation(deepDip = true)
+            }
+        }
+
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() { _status.value = "Processing…" }
+        override fun onEndOfSpeech() {
+            speechBurstAttenuation = false
+            refreshMediaVolumeIsolation(deepDip = false)
+            _status.value = "Processing…"
+        }
 
         override fun onError(error: Int) {
             _isListening.value = false
@@ -373,46 +426,107 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     // endregion
 
-    // region Audio ducking ---------------------------------------------------------------------
+    // region Audio isolation -------------------------------------------------------------------
 
+    private fun mediaIsolationEnabled(): Boolean =
+        prefs().getBoolean("duck_media_audio", true)
+
+    private fun audioManager(): AudioManager =
+        getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    /**
+     * Two-layer strategy for loud foreground video:
+     * 1. Transient audio focus (cooperative duck — works on some apps only).
+     * 2. Direct [STREAM_MUSIC] attenuation from the saved user volume (reliable on TikTok/Reels).
+     * During active speech we dip even lower so reel dialog/SFX cannot mask commands.
+     */
     private fun acquireAudioDucking() {
-        if (hasAudioFocus) return
-        if (!prefs().getBoolean("duck_media_audio", true)) return
-        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attrs = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val request = AudioFocusRequest.Builder(
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-            )
-                .setAudioAttributes(attrs)
-                .setWillPauseWhenDucked(false)
-                .build()
-            audioFocusRequest = request
-            am.requestAudioFocus(request)
-        } else {
-            @Suppress("DEPRECATION")
-            am.requestAudioFocus(
-                null,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-            )
+        if (!mediaIsolationEnabled()) return
+        if (!hasAudioFocus) {
+            val am = audioManager()
+            val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                val request = AudioFocusRequest.Builder(
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                )
+                    .setAudioAttributes(attrs)
+                    .setOnAudioFocusChangeListener(audioFocusChangeListener, handler)
+                    .setWillPauseWhenDucked(false)
+                    .build()
+                audioFocusRequest = request
+                am.requestAudioFocus(request)
+            } else {
+                @Suppress("DEPRECATION")
+                am.requestAudioFocus(
+                    audioFocusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                )
+            }
+            hasAudioFocus = granted == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         }
-        hasAudioFocus = granted == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        refreshMediaVolumeIsolation(speechBurstAttenuation)
+    }
+
+    private fun refreshMediaVolumeIsolation(deepDip: Boolean) {
+        if (!mediaIsolationEnabled()) return
+        val am = audioManager()
+        if (!deepDip && !am.isMusicActive) return
+
+        val stream = AudioManager.STREAM_MUSIC
+        if (savedMusicVolume < 0) {
+            savedMusicVolume = am.getStreamVolume(stream)
+        }
+        val maxVol = am.getStreamMaxVolume(stream)
+        if (maxVol <= 0) return
+
+        val baseline = savedMusicVolume.coerceIn(0, maxVol)
+        val listeningTarget = maxOf(
+            1,
+            (baseline * LISTENING_VOLUME_FRACTION).toInt().coerceAtMost(baseline)
+        )
+        val target = if (deepDip) {
+            maxOf(0, minOf(listeningTarget, SPEECH_BURST_MAX_VOLUME))
+        } else {
+            listeningTarget
+        }
+
+        if (am.getStreamVolume(stream) != target) {
+            am.setStreamVolume(stream, target, 0)
+        }
+        mediaAttenuationActive = true
     }
 
     private fun releaseAudioDucking() {
+        releaseMediaVolumeIsolation()
         if (!hasAudioFocus) return
-        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val am = audioManager()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
         } else {
             @Suppress("DEPRECATION")
-            am.abandonAudioFocus(null)
+            am.abandonAudioFocus(audioFocusChangeListener)
         }
         hasAudioFocus = false
+        audioFocusRequest = null
+    }
+
+    private fun releaseMediaVolumeIsolation() {
+        if (!mediaAttenuationActive && savedMusicVolume < 0) return
+        val am = audioManager()
+        val stream = AudioManager.STREAM_MUSIC
+        if (savedMusicVolume >= 0) {
+            val restore = savedMusicVolume.coerceIn(0, am.getStreamMaxVolume(stream))
+            if (am.getStreamVolume(stream) != restore) {
+                am.setStreamVolume(stream, restore, 0)
+            }
+        }
+        savedMusicVolume = -1
+        mediaAttenuationActive = false
+        speechBurstAttenuation = false
     }
 
     // endregion

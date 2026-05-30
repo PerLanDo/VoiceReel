@@ -31,9 +31,12 @@ it's already playing) does nothing, so they never accidentally toggle the wrong 
 Recognizing speech while a loud video plays — and reacting cleanly — is the hard part. Voice Reels
 handles it on several fronts:
 
-- **Ducks the video audio while listening.** When voice control is on, Voice Reels holds transient
-  audio focus so the foreground app lowers (ducks) its volume, letting the microphone pick up your
-  voice clearly. Toggle under *Listening & performance → Lower video volume while listening*.
+- **Isolates video audio while listening.** When voice control is on, Voice Reels holds transient
+  audio focus *and* lowers the media stream to ~18% of your current volume (many short-video apps
+  ignore focus-only ducking). While you are actively speaking it dips further — near-mute — so loud
+  dialog and music in the reel cannot mask your command. The recognizer also prefers the
+  `VOICE_COMMUNICATION` mic path on Android 10+ for hardware echo cancellation. Toggle under
+  *Listening & performance → Lower video volume while listening*.
 - **Acts on partial results.** Commands fire the **instant** a matching word is detected, instead of
   waiting for you to finish a sentence, with sub-second restart latency between listening cycles.
 - **Sensitive, fuzzy matching.** The parser understands synonyms, common mis-hearings (e.g.
@@ -101,7 +104,7 @@ Open Voice Reels and complete the three setup steps on the home screen:
 Under **Listening & performance** you can fine-tune behavior:
 
 - **Repeat protection** — how long the same command is suppressed after firing (1s / 2s / 3s).
-- **Lower video volume while listening** (on by default) — ducks the video so your voice is heard.
+- **Lower video volume while listening** (on by default) — focus + direct media attenuation for loud feeds.
 - **Silence recognition beeps** — mutes the system beeps that play when listening starts.
 - **Floating controls bubble** — a draggable, always-on-top widget with manual buttons.
 
@@ -141,8 +144,8 @@ cases) and basic app resources. Run them with:
 - Play/Pause state detection relies on whether the app is emitting audio. If you watch with the
   video **muted**, Voice Reels can't tell playing from paused, so it falls back to doing nothing for
   the already-in-that-state case.
-- Audio ducking lowers the video volume while listening. Well-behaved apps duck rather than pause; if
-  a particular app pauses instead, turn the option off.
+- Media attenuation lowers playback volume while listening and restores it when you turn voice
+  control off. If an app pauses instead of playing quietly, turn the option off.
 - Gesture targeting is coordinate-based for scroll/play and works across phones, but heavily
   customized device skins or unusual layouts may need different swipe zones.
 - Because matching is intentionally sensitive, an unrelated word that sounds like a command can
