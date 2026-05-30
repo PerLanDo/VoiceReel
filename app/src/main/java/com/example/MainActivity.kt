@@ -627,8 +627,10 @@ private fun launchApp(context: Context, app: AppEntry) {
                         context.startActivity(deepLinkIntent)
                         true
                     }
-                    else -> pm.getLaunchIntentForPackage(installedPkg)?.let {
-                        context.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    else -> pm.getLaunchIntentForPackage(installedPkg)?.let { launchIntent ->
+                        context.startActivity(launchIntent.apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
                         true
                     } ?: false
                 }

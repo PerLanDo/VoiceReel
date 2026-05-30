@@ -692,6 +692,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 textSize = 10f
                 setTextColor(BUBBLE_CLOSE_TEXT_COLOR)
                 contentDescription = "Close floating bubble"
+                isClickable = true
+                isFocusable = true
                 gravity = Gravity.CENTER
                 setPadding(dp(4), dp(2), dp(4), dp(2))
                 layoutParams = FrameLayout.LayoutParams(
@@ -734,7 +736,11 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                         MotionEvent.ACTION_UP -> {
                             if (!dragging) {
                                 val closeArea = dp(BUBBLE_CLOSE_HIT_AREA_DP)
-                                val hitClose = event.x >= (v.width - closeArea) && event.y <= closeArea
+                                val location = IntArray(2)
+                                v.getLocationOnScreen(location)
+                                val localX = event.rawX - location[0]
+                                val localY = event.rawY - location[1]
+                                val hitClose = localX >= (v.width - closeArea) && localY <= closeArea
                                 if (hitClose) {
                                     dismissFloatingOverlay()
                                 } else {
