@@ -1,12 +1,12 @@
 package com.example
 
-import android.content.pm.PackageManager
-import androidx.core.content.ContextCompat
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -25,39 +25,78 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RelativeLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import android.content.SharedPreferences
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * The heart of Voice Reels.
+ *
+ * This Accessibility Service listens for voice commands in the background and translates them into
+ * swipe / tap gestures (and, where possible, real "like" button clicks) on whatever short-video app
+ * is currently in the foreground — TikTok, Instagram Reels, Facebook Reels or YouTube Shorts.
+ *
+ * It only inspects the foreground package name to choose the right "like" strategy, and only reads
+ * the on-screen node tree on demand when a "like" command is issued for an app that does not support
+ * double-tap-to-like (currently YouTube). It never stores screen content.
+ */
 class VoiceReelsAccessibilityService : AccessibilityService() {
 
     companion object {
-        var isServiceRunning = false
-            private set
-            
-        var isVoiceControlActive = false
+        const val PKG_TIKTOK = "com.zhiliaoapp.musically"
+        const val PKG_TIKTOK_ALT = "com.ss.android.ugc.aweme"
+        const val PKG_YOUTUBE = "com.google.android.youtube"
+        const val PKG_INSTAGRAM = "com.instagram.android"
+        const val PKG_FACEBOOK = "com.facebook.katana"
+
+        val SUPPORTED_PACKAGES = setOf(
+            PKG_TIKTOK, PKG_TIKTOK_ALT, PKG_YOUTUBE, PKG_INSTAGRAM, PKG_FACEBOOK
+        )
+
+        private var instance: VoiceReelsAccessibilityService? = null
+
+        private val _isRunning = MutableStateFlow(false)
+        val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
+
+        private val _isListening = MutableStateFlow(false)
+        val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
+
+        private val _status = MutableStateFlow("Service not running")
+        val status: StateFlow<String> = _status.asStateFlow()
+
+        private val _lastCommand = MutableStateFlow<String?>(null)
+        val lastCommand: StateFlow<String?> = _lastCommand.asStateFlow()
+
+        private val _foregroundApp = MutableStateFlow<String?>(null)
+        val foregroundApp: StateFlow<String?> = _foregroundApp.asStateFlow()
+
+        /** Toggled from the UI. Drives whether the service is actively listening. */
+        var isVoiceControlActive: Boolean = false
             set(value) {
                 field = value
                 instance?.toggleListeningState(value)
             }
-            
-        var isOverlayEnabled = false
+
+        /** Toggled from the UI. Drives the floating control bubble. */
+        var isOverlayEnabled: Boolean = false
             set(value) {
                 field = value
                 instance?.toggleOverlay(value)
             }
-            
-        private var instance: VoiceReelsAccessibilityService? = null
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var recognizerIntent: Intent? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    private var currentPackage: String? = null
 
     // Overlay components
     private var windowManager: WindowManager? = null
@@ -65,71 +104,76 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var panelView: View? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var panelParams: WindowManager.LayoutParams? = null
+    private var listeningSwitch: Switch? = null
+    private var silenceSwitch: Switch? = null
 
-    // Audio system volumes preservation
-    private var originalSystemVolume = -1
     private var isQuietModeActive = false
 
-    // SharedPreferences listener
-    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
-        if (key == "show_floating_overlay") {
-            val show = sharedPreferences.getBoolean("show_floating_overlay", false)
-            toggleOverlay(show)
+    private val preferenceListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
+            when (key) {
+                "global_voice_control_enabled" ->
+                    isVoiceControlActive = sharedPreferences.getBoolean(key, false)
+                "show_floating_overlay" ->
+                    toggleOverlay(sharedPreferences.getBoolean(key, false))
+            }
         }
-        if (key == "global_voice_control_enabled") {
-            val active = sharedPreferences.getBoolean("global_voice_control_enabled", false)
-            isVoiceControlActive = active
-        }
-    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        isServiceRunning = true
-        
-        // Sync setting with saved value
-        val prefs = getSharedPreferences("voice_reels_prefs", Context.MODE_PRIVATE)
-        isVoiceControlActive = prefs.getBoolean("global_voice_control_enabled", false)
-        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
-        
-        Toast.makeText(this, "Voice Reels Assistant Connected", Toast.LENGTH_LONG).show()
-        
-        if (isVoiceControlActive) {
-            startListening()
-        }
+        _isRunning.value = true
+        _status.value = "Ready"
 
-        // Toggle state matching saved window overlay visibility
-        val showOverlay = prefs.getBoolean("show_floating_overlay", false)
-        toggleOverlay(showOverlay)
+        val prefs = prefs()
+        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
+
+        isVoiceControlActive = prefs.getBoolean("global_voice_control_enabled", false)
+        toggleOverlay(prefs.getBoolean("show_floating_overlay", false))
+
+        Toast.makeText(this, "Voice Reels assistant connected", Toast.LENGTH_SHORT).show()
     }
 
-    fun toggleListeningState(active: Boolean) {
-        handler.post {
-            if (active) {
-                startListening()
-            } else {
-                stopListening()
-            }
+    // region Foreground app tracking ------------------------------------------------------------
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val pkg = event.packageName?.toString() ?: return
+            // Ignore our own UI and system UI churn.
+            if (pkg == packageName) return
+            currentPackage = pkg
+            _foregroundApp.value = pkg
         }
+    }
+
+    override fun onInterrupt() {}
+
+    // endregion
+
+    // region Speech recognition ----------------------------------------------------------------
+
+    fun toggleListeningState(active: Boolean) {
+        handler.post { if (active) startListening() else stopListening() }
     }
 
     private fun startListening() {
-        if (!isServiceRunning || !isVoiceControlActive) return
-        
-        // Ensure execution is strictly scheduled on the main/UI thread
+        if (!_isRunning.value || !isVoiceControlActive) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
             handler.post { startListening() }
             return
         }
-
-        // Verify microphone permission is granted before utilizing SpeechRecognizer
-        val hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (!hasPermission) {
+        val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!hasMic) {
+            _status.value = "Microphone permission needed"
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            _status.value = "No speech engine on this device"
             return
         }
 
-        // Apply silence filter configuration
-        muteSystemSounds()
+        muteSystemSoundsIfRequested()
 
         try {
             if (speechRecognizer == null) {
@@ -137,17 +181,21 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                     setRecognitionListener(createSpeechListener())
                 }
             }
-
             if (recognizerIntent == null) {
                 recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(
+                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                    )
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
                 }
             }
-
             speechRecognizer?.startListening(recognizerIntent)
+            _isListening.value = true
+            _status.value = "Listening…"
         } catch (e: Exception) {
-            // silent catch on emulator or if offline
+            _status.value = "Could not start microphone"
         }
     }
 
@@ -159,501 +207,384 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         try {
             speechRecognizer?.stopListening()
             speechRecognizer?.destroy()
-            speechRecognizer = null
         } catch (e: Exception) {
-            // silent catch
+            // ignore
         }
+        speechRecognizer = null
+        _isListening.value = false
+        if (_isRunning.value) _status.value = "Paused"
         restoreSystemSounds()
     }
 
-    private fun createSpeechListener(): RecognitionListener {
-        return object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+    private fun scheduleRestart(delayMs: Long) {
+        if (!isVoiceControlActive || !_isRunning.value) return
+        handler.postDelayed({
+            if (isVoiceControlActive && _isRunning.value) startListening()
+        }, delayMs)
+    }
 
-            override fun onError(error: Int) {
-                // Throttle retries on busy or soft recognition errors to prevent rapid recursion loops
-                val delayTime = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 3000L else 1800L
-                if (isVoiceControlActive && isServiceRunning) {
-                    handler.postDelayed({
-                        if (isVoiceControlActive && isServiceRunning) {
-                            startListening()
-                        }
-                    }, delayTime)
-                }
-            }
+    private fun createSpeechListener(): RecognitionListener = object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) { _status.value = "Listening…" }
+        override fun onBeginningOfSpeech() { _status.value = "Hearing you…" }
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() { _status.value = "Processing…" }
 
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!matches.isNullOrEmpty()) {
-                    handleVoiceCommand(matches[0])
-                }
+        override fun onError(error: Int) {
+            // No match / timeout are normal during quiet periods; just loop again.
+            val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 2500L else 1200L
+            _isListening.value = false
+            scheduleRestart(delay)
+        }
 
-                if (isVoiceControlActive && isServiceRunning) {
-                    handler.postDelayed({
-                        if (isVoiceControlActive && isServiceRunning) {
-                            startListening()
-                        }
-                    }, 1200) // healthy pause before restarting mic capture to let media flow smoothly
-                }
-            }
+        override fun onResults(results: Bundle?) {
+            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            if (!matches.isNullOrEmpty()) handleSpeech(matches[0])
+            _isListening.value = false
+            scheduleRestart(800L)
+        }
 
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
+        override fun onPartialResults(partialResults: Bundle?) {}
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+    }
+
+    private fun handleSpeech(heard: String) {
+        when (VoiceCommandParser.parse(heard)) {
+            VoiceCommand.NEXT -> { announce("Next ⬇️", heard); swipeUp() }
+            VoiceCommand.PREVIOUS -> { announce("Previous ⬆️", heard); swipeDown() }
+            VoiceCommand.PLAY_PAUSE -> { announce("Play / Pause ⏯️", heard); performTap() }
+            VoiceCommand.LIKE -> { announce("Like ❤️", heard); doLike() }
+            VoiceCommand.NONE -> { _lastCommand.value = "\"$heard\"" }
         }
     }
 
-    private fun handleVoiceCommand(heard: String) {
-        val command = heard.lowercase().trim()
-        
-        when {
-            // MATCH SCROLL UP / GO TO NEXT VIDEO (Swipe Up Gesture)
-            command.contains("next") || command.contains("down") || command.contains("skip") || command.contains("forward") -> {
-                showMatchToast("Next Video ⬇️")
-                swipeUp()
-            }
-            // MATCH SCROLL DOWN / GO TO PREVIOUS VIDEO (Swipe Down Gesture)
-            command.contains("prev") || command.contains("previous") || command.contains("back") || command.contains("up") -> {
-                showMatchToast("Previous Video ⬆️")
-                swipeDown()
-            }
-            // MATCH PLAY / PAUSE SINGLE TAP ON SCREEN
-            command.contains("pause") || command.contains("stop") || command.contains("wait") || command.contains("play") || command.contains("resume") -> {
-                showMatchToast("Play / Pause ⏸️🎬")
-                performTap()
-            }
-            // MATCH DOUBLE TAP ON SCREEN (LIKE FEEDBACK EVENT)
-            command.contains("like") || command.contains("love") || command.contains("heart") || command.contains("favorite") -> {
-                showMatchToast("Liked! ❤️")
-                performDoubleTap()
-            }
+    private fun announce(action: String, heard: String) {
+        _lastCommand.value = "$action  ·  heard \"$heard\""
+        showMatchToast(action)
+    }
+
+    // endregion
+
+    // region Gestures --------------------------------------------------------------------------
+
+    private fun screenWidth() = resources.displayMetrics.widthPixels.toFloat()
+    private fun screenHeight() = resources.displayMetrics.heightPixels.toFloat()
+
+    private fun dispatchSwipe(startYFraction: Float, endYFraction: Float, durationMs: Long = 260L) {
+        val x = screenWidth() / 2f
+        val path = Path().apply {
+            moveTo(x, screenHeight() * startYFraction)
+            lineTo(x, screenHeight() * endYFraction)
         }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        dispatchGesture(gesture, null, null)
+    }
+
+    private fun swipeUp() = dispatchSwipe(0.80f, 0.22f)
+
+    private fun swipeDown() = dispatchSwipe(0.25f, 0.83f)
+
+    private fun performTap() {
+        val path = Path().apply { moveTo(screenWidth() / 2f, screenHeight() / 2f) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+            .build()
+        dispatchGesture(gesture, null, null)
+    }
+
+    private fun performDoubleTap() {
+        val cx = screenWidth() / 2f
+        val cy = screenHeight() / 2f
+        val first = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(Path().apply { moveTo(cx, cy) }, 0, 50))
+            .build()
+        dispatchGesture(first, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                handler.postDelayed({
+                    val second = GestureDescription.Builder()
+                        .addStroke(
+                            GestureDescription.StrokeDescription(
+                                Path().apply { moveTo(cx, cy) }, 0, 50
+                            )
+                        )
+                        .build()
+                    dispatchGesture(second, null, null)
+                }, 120)
+            }
+        }, null)
+    }
+
+    /**
+     * TikTok / Instagram / Facebook reliably "like" on a center double-tap. YouTube uses the
+     * double-tap to seek, so for YouTube we try to find and click the real Like button instead.
+     */
+    private fun doLike() {
+        val pkg = currentPackage
+        if (pkg == PKG_YOUTUBE) {
+            if (!clickLikeButton()) performDoubleTap()
+        } else {
+            performDoubleTap()
+        }
+    }
+
+    private fun clickLikeButton(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val node = findLikeNode(root, 0) ?: return false
+        var clickable: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (clickable != null && !clickable.isClickable && depth < 6) {
+            clickable = clickable.parent
+            depth++
+        }
+        return clickable?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+    }
+
+    private fun findLikeNode(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
+        if (node == null || depth > 40) return null
+        val desc = node.contentDescription?.toString()?.lowercase()
+        if (desc != null &&
+            desc.contains("like") &&
+            !desc.contains("dislike") &&
+            !desc.contains("unlike")
+        ) {
+            return node
+        }
+        for (i in 0 until node.childCount) {
+            findLikeNode(node.getChild(i), depth + 1)?.let { return it }
+        }
+        return null
     }
 
     private fun showMatchToast(message: String) {
         Toast.makeText(applicationContext, "Voice Reels: $message", Toast.LENGTH_SHORT).show()
     }
 
-    private fun swipeUp() {
-        val displayMetrics = resources.displayMetrics
-        val width = displayMetrics.widthPixels.toFloat()
-        val height = displayMetrics.heightPixels.toFloat()
+    // endregion
 
-        val startX = width / 2
-        val startY = height * 0.75f
-        val endX = width / 2
-        val endY = height * 0.20f
+    // region System sound muting ---------------------------------------------------------------
 
-        val path = Path().apply {
-            moveTo(startX, startY)
-            lineTo(endX, endY)
-        }
-
-        val strokeDescription = GestureDescription.StrokeDescription(path, 0, 300)
-        val gestureBuilder = GestureDescription.Builder().apply {
-            addStroke(strokeDescription)
-        }
-
-        dispatchGesture(gestureBuilder.build(), null, null)
-    }
-
-    private fun swipeDown() {
-        val displayMetrics = resources.displayMetrics
-        val width = displayMetrics.widthPixels.toFloat()
-        val height = displayMetrics.heightPixels.toFloat()
-
-        val startX = width / 2
-        val startY = height * 0.25f
-        val endX = width / 2
-        val endY = height * 0.80f
-
-        val path = Path().apply {
-            moveTo(startX, startY)
-            lineTo(endX, endY)
-        }
-
-        val strokeDescription = GestureDescription.StrokeDescription(path, 0, 300)
-        val gestureBuilder = GestureDescription.Builder().apply {
-            addStroke(strokeDescription)
-        }
-
-        dispatchGesture(gestureBuilder.build(), null, null)
-    }
-
-    private fun performTap() {
-        val displayMetrics = resources.displayMetrics
-        val centerX = displayMetrics.widthPixels / 2f
-        val centerY = displayMetrics.heightPixels / 2f
-
-        val path = Path().apply {
-            moveTo(centerX, centerY)
-        }
-
-        val strokeDescription = GestureDescription.StrokeDescription(path, 0, 80)
-        val gestureBuilder = GestureDescription.Builder().apply {
-            addStroke(strokeDescription)
-        }
-
-        dispatchGesture(gestureBuilder.build(), null, null)
-    }
-
-    private fun performDoubleTap() {
-        val displayMetrics = resources.displayMetrics
-        val centerX = displayMetrics.widthPixels / 2f
-        val centerY = displayMetrics.heightPixels / 2f
-
-        // Gesture tap 1
-        val path1 = Path().apply { moveTo(centerX, centerY) }
-        val gestureBuilder1 = GestureDescription.Builder().apply {
-            addStroke(GestureDescription.StrokeDescription(path1, 0, 50))
-        }
-
-        dispatchGesture(gestureBuilder1.build(), object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                super.onCompleted(gestureDescription)
-                // Gesture tap 2 scheduled swift overlay matching double touch
-                handler.postDelayed({
-                    val path2 = Path().apply { moveTo(centerX, centerY) }
-                    val gestureBuilder2 = GestureDescription.Builder().apply {
-                        addStroke(GestureDescription.StrokeDescription(path2, 0, 50))
-                    }
-                    dispatchGesture(gestureBuilder2.build(), null, null)
-                }, 150)
-            }
-        }, null)
-    }
-
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-    override fun onInterrupt() {}
-
-    private fun muteSystemSounds() {
-        val prefs = getSharedPreferences("voice_reels_prefs", Context.MODE_PRIVATE)
-        val shouldMute = prefs.getBoolean("mute_voice_beeps", true)
-        if (!shouldMute) return
-
+    private fun muteSystemSoundsIfRequested() {
+        if (!prefs().getBoolean("mute_voice_beeps", true)) return
         try {
-            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0)
-                audioManager.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_MUTE, 0)
-                audioManager.adjustStreamVolume(AudioManager.STREAM_ALARM, AudioManager.ADJUST_MUTE, 0)
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.setStreamMute(AudioManager.STREAM_SYSTEM, true)
-                @Suppress("DEPRECATION")
-                audioManager.setStreamMute(AudioManager.STREAM_NOTIFICATION, true)
-                @Suppress("DEPRECATION")
-                audioManager.setStreamMute(AudioManager.STREAM_ALARM, true)
-            }
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0)
+            am.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_MUTE, 0)
             isQuietModeActive = true
         } catch (e: Exception) {
-            // silent catch
+            // ignore
         }
     }
 
     private fun restoreSystemSounds() {
         if (!isQuietModeActive) return
         try {
-            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
-                audioManager.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_UNMUTE, 0)
-                audioManager.adjustStreamVolume(AudioManager.STREAM_ALARM, AudioManager.ADJUST_UNMUTE, 0)
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.setStreamMute(AudioManager.STREAM_SYSTEM, false)
-                @Suppress("DEPRECATION")
-                audioManager.setStreamMute(AudioManager.STREAM_NOTIFICATION, false)
-                @Suppress("DEPRECATION")
-                audioManager.setStreamMute(AudioManager.STREAM_ALARM, false)
-            }
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
+            am.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_UNMUTE, 0)
         } catch (e: Exception) {
-            // silent catch
+            // ignore
         }
         isQuietModeActive = false
     }
 
+    // endregion
+
+    // region Floating overlay ------------------------------------------------------------------
+
     fun toggleOverlay(show: Boolean) {
-        handler.post {
-            if (show) {
-                showFloatingViews()
-            } else {
-                hideFloatingViews()
-            }
-        }
+        handler.post { if (show) showFloatingViews() else hideFloatingViews() }
     }
 
-    private var listeningSwitch: Switch? = null
-    private var silenceSwitch: Switch? = null
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     private fun createBubbleAndPanelViews() {
         val context = this
-        val metrics = resources.displayMetrics
-        val dpToPx = { dp: Int -> (dp * metrics.density).toInt() }
 
         if (bubbleView == null) {
-            val container = FrameLayout(context)
-            val shape = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0xFF0F172A.toInt()) // slate 900
-                setStroke(dpToPx(2), 0xFF38BDF8.toInt()) // sky cyan outline
+            val container = FrameLayout(context).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(0xFF0F172A.toInt())
+                    setStroke(dp(2), 0xFF38BDF8.toInt())
+                }
+                setPadding(dp(12), dp(12), dp(12), dp(12))
             }
-            container.background = shape
-            container.setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
-
-            val bubbleText = TextView(context).apply {
+            container.addView(TextView(context).apply {
                 text = "🎙️"
                 textSize = 20f
                 gravity = Gravity.CENTER
-            }
-            container.addView(bubbleText)
-
+            })
             container.setOnTouchListener(object : View.OnTouchListener {
                 private var initialX = 0
                 private var initialY = 0
-                private var initialTouchX = 0f
-                private var initialTouchY = 0f
-                private var isDragging = false
+                private var touchX = 0f
+                private var touchY = 0f
+                private var dragging = false
 
                 override fun onTouch(v: View, event: MotionEvent): Boolean {
                     when (event.action) {
                         MotionEvent.ACTION_DOWN -> {
                             initialX = bubbleParams?.x ?: 0
                             initialY = bubbleParams?.y ?: 0
-                            initialTouchX = event.rawX
-                            initialTouchY = event.rawY
-                            isDragging = false
+                            touchX = event.rawX
+                            touchY = event.rawY
+                            dragging = false
                             return true
                         }
                         MotionEvent.ACTION_MOVE -> {
-                            val dx = (event.rawX - initialTouchX).toInt()
-                            val dy = (event.rawY - initialTouchY).toInt()
-                            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-                                isDragging = true
-                            }
+                            val dx = (event.rawX - touchX).toInt()
+                            val dy = (event.rawY - touchY).toInt()
+                            if (kotlin.math.abs(dx) > 10 || kotlin.math.abs(dy) > 10) dragging = true
                             bubbleParams?.x = initialX + dx
                             bubbleParams?.y = initialY + dy
-                            
                             if (panelView?.parent != null && panelParams != null) {
                                 panelParams?.x = bubbleParams?.x ?: 100
-                                panelParams?.y = (bubbleParams?.y ?: 300) + v.height + dpToPx(8)
-                                windowManager?.updateViewLayout(panelView, panelParams)
+                                panelParams?.y = (bubbleParams?.y ?: 300) + v.height + dp(8)
+                                runCatching { windowManager?.updateViewLayout(panelView, panelParams) }
                             }
-                            
-                            windowManager?.updateViewLayout(container, bubbleParams)
+                            runCatching { windowManager?.updateViewLayout(v, bubbleParams) }
                             return true
                         }
                         MotionEvent.ACTION_UP -> {
-                            if (!isDragging) {
-                                toggleControlPanel()
-                            }
+                            if (!dragging) toggleControlPanel()
                             return true
                         }
                     }
                     return false
                 }
             })
-
             bubbleView = container
         }
 
         if (panelView == null) {
-            val rootLayout = LinearLayout(context).apply {
+            val root = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                val bg = GradientDrawable().apply {
+                background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    setColor(0xFF1E293B.toInt()) // slate 800
-                    cornerRadius = dpToPx(16).toFloat()
-                    setStroke(dpToPx(1), 0xFF38BDF8.toInt()) // sky cyan outline
+                    setColor(0xFF1E293B.toInt())
+                    cornerRadius = dp(16).toFloat()
+                    setStroke(dp(1), 0xFF38BDF8.toInt())
                 }
-                background = bg
-                setPadding(dpToPx(14), dpToPx(14), dpToPx(14), dpToPx(14))
-                layoutParams = ViewGroup.LayoutParams(
-                    dpToPx(210),
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
+                setPadding(dp(14), dp(14), dp(14), dp(14))
+                layoutParams = ViewGroup.LayoutParams(dp(210), ViewGroup.LayoutParams.WRAP_CONTENT)
             }
 
-            // Header Layout
-            val headerLayout = LinearLayout(context).apply {
+            val header = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            val titleText = TextView(context).apply {
-                text = "Voice Controller"
+            header.addView(TextView(context).apply {
+                text = "Voice Reels"
                 setTextColor(0xFFFFFFFF.toInt())
                 textSize = 13f
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val minimizeBtn = TextView(context).apply {
+            })
+            header.addView(TextView(context).apply {
                 text = "✖"
                 setTextColor(0xFF94A3B8.toInt())
                 textSize = 14f
-                setPadding(dpToPx(6), dpToPx(6), dpToPx(6), dpToPx(6))
-                setOnClickListener {
-                    toggleControlPanel()
-                }
-            }
-            headerLayout.addView(titleText)
-            headerLayout.addView(minimizeBtn)
-            rootLayout.addView(headerLayout)
+                setPadding(dp(6), dp(6), dp(6), dp(6))
+                setOnClickListener { toggleControlPanel() }
+            })
+            root.addView(header)
+            root.addView(divider())
 
-            // Divider 1
-            val divider1 = View(context).apply {
-                setBackgroundColor(0xFF334155.toInt())
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    dpToPx(1)
-                ).apply {
-                    setMargins(0, dpToPx(8), 0, dpToPx(8))
-                }
-            }
-            rootLayout.addView(divider1)
+            val prefs = prefs()
 
-            val prefs = getSharedPreferences("voice_reels_prefs", Context.MODE_PRIVATE)
+            root.addView(switchRow("Voice control", isVoiceControlActive) { checked ->
+                prefs.edit().putBoolean("global_voice_control_enabled", checked).apply()
+                isVoiceControlActive = checked
+            }.also { listeningSwitch = it.second }.first)
 
-            // Toggle 1: Background Voice Control
-            val listeningRow = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val listeningLabel = TextView(context).apply {
-                text = "Voice Control"
-                setTextColor(0xFFE2E8F0.toInt())
-                textSize = 12f
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            listeningSwitch = Switch(context).apply {
-                isChecked = isVoiceControlActive
-                setOnCheckedChangeListener { _, isChecked ->
-                    prefs.edit().putBoolean("global_voice_control_enabled", isChecked).apply()
-                    isVoiceControlActive = isChecked
-                }
-            }
-            listeningRow.addView(listeningLabel)
-            listeningRow.addView(listeningSwitch)
-            rootLayout.addView(listeningRow)
+            root.addView(switchRow("Silence beeps", prefs.getBoolean("mute_voice_beeps", true)) { checked ->
+                prefs.edit().putBoolean("mute_voice_beeps", checked).apply()
+                if (!checked) restoreSystemSounds()
+            }.also { silenceSwitch = it.second }.first)
 
-            // Spacer
-            val spacerPref = View(context).apply {
-                layoutParams = LinearLayout.LayoutParams(1, dpToPx(6))
-            }
-            rootLayout.addView(spacerPref)
-
-            // Toggle 2: Silence Beeps
-            val silenceRow = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val silenceLabel = TextView(context).apply {
-                text = "Silence Beeps"
-                setTextColor(0xFFE2E8F0.toInt())
-                textSize = 12f
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            silenceSwitch = Switch(context).apply {
-                isChecked = prefs.getBoolean("mute_voice_beeps", true)
-                setOnCheckedChangeListener { _, isChecked ->
-                    prefs.edit().putBoolean("mute_voice_beeps", isChecked).apply()
-                    if (!isChecked) {
-                        restoreSystemSounds()
-                    }
-                }
-            }
-            silenceRow.addView(silenceLabel)
-            silenceRow.addView(silenceSwitch)
-            rootLayout.addView(silenceRow)
-
-            // Divider 2
-            val divider2 = View(context).apply {
-                setBackgroundColor(0xFF334155.toInt())
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    dpToPx(1)
-                ).apply {
-                    setMargins(0, dpToPx(8), 0, dpToPx(8))
-                }
-            }
-            rootLayout.addView(divider2)
-
-            // Actions head
-            val actionLabel = TextView(context).apply {
-                text = "Manual Triggers"
+            root.addView(divider())
+            root.addView(TextView(context).apply {
+                text = "Manual triggers"
                 setTextColor(0xFF94A3B8.toInt())
                 textSize = 10f
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-            rootLayout.addView(actionLabel)
+            })
 
-            // Action Buttons Row 1 (Prev, Next)
-            val btnRow1 = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = dpToPx(6)
-                }
-            }
-            
-            val createPillButton = { textStr: String, onClickAction: () -> Unit ->
-                TextView(context).apply {
-                    text = textStr
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 11f
-                    gravity = Gravity.CENTER
-                    val btnBg = GradientDrawable().apply {
-                        setColor(0xFF334155.toInt())
-                        cornerRadius = dpToPx(8).toFloat()
-                    }
-                    background = btnBg
-                    setPadding(dpToPx(8), dpToPx(6), dpToPx(8), dpToPx(6))
-                    setOnClickListener { onClickAction() }
-                    layoutParams = LinearLayout.LayoutParams(
-                        0,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        1f
-                    ).apply {
-                        setMargins(dpToPx(3), 0, dpToPx(3), 0)
-                    }
-                }
-            }
+            root.addView(buttonRow("Prev ⬆️", { swipeDown() }, "Next ⬇️", { swipeUp() }))
+            root.addView(buttonRow("Play ⏯️", { performTap() }, "Like ❤️", { doLike() }))
 
-            val nextBtn = createPillButton("Next ⬇️") { swipeUp() }
-            val prevBtn = createPillButton("Prev ⬆️") { swipeDown() }
-            btnRow1.addView(prevBtn)
-            btnRow1.addView(nextBtn)
-            rootLayout.addView(btnRow1)
+            panelView = root
+        }
+    }
 
-            // Action Buttons Row 2 (Pause, Like)
-            val btnRow2 = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = dpToPx(6)
-                }
-            }
-            val pauseBtn = createPillButton("Pause ⏸️") { performTap() }
-            val likeBtn = createPillButton("Like ❤️") { performDoubleTap() }
-            btnRow2.addView(pauseBtn)
-            btnRow2.addView(likeBtn)
-            rootLayout.addView(btnRow2)
+    private fun divider(): View = View(this).apply {
+        setBackgroundColor(0xFF334155.toInt())
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
+            setMargins(0, dp(8), 0, dp(8))
+        }
+    }
 
-            panelView = rootLayout
+    private fun switchRow(
+        label: String,
+        checked: Boolean,
+        onChange: (Boolean) -> Unit
+    ): Pair<View, Switch> {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(4) }
+        }
+        row.addView(TextView(this).apply {
+            text = label
+            setTextColor(0xFFE2E8F0.toInt())
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        val sw = Switch(this).apply {
+            isChecked = checked
+            setOnCheckedChangeListener { _, isChecked -> onChange(isChecked) }
+        }
+        row.addView(sw)
+        return row to sw
+    }
+
+    private fun buttonRow(
+        leftText: String, leftAction: () -> Unit,
+        rightText: String, rightAction: () -> Unit
+    ): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(6) }
+        }
+        row.addView(pillButton(leftText, leftAction))
+        row.addView(pillButton(rightText, rightAction))
+        return row
+    }
+
+    private fun pillButton(text: String, action: () -> Unit): TextView = TextView(this).apply {
+        this.text = text
+        setTextColor(0xFFFFFFFF.toInt())
+        textSize = 11f
+        gravity = Gravity.CENTER
+        background = GradientDrawable().apply {
+            setColor(0xFF334155.toInt())
+            cornerRadius = dp(8).toFloat()
+        }
+        setPadding(dp(8), dp(6), dp(8), dp(6))
+        setOnClickListener { action() }
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            setMargins(dp(3), 0, dp(3), 0)
         }
     }
 
     private fun showFloatingViews() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            return
-        }
-
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) return
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         windowManager = wm
 
@@ -669,7 +600,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 layoutType,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
@@ -679,81 +611,56 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         createBubbleAndPanelViews()
-
-        if (bubbleView != null && bubbleView?.parent != null) {
-            try {
-                wm.removeView(bubbleView)
-            } catch (e: Exception) {}
-        }
-
-        try {
-            wm.addView(bubbleView, bubbleParams)
-        } catch (e: Exception) {}
+        if (bubbleView?.parent != null) runCatching { wm.removeView(bubbleView) }
+        runCatching { wm.addView(bubbleView, bubbleParams) }
     }
 
     private fun hideFloatingViews() {
         val wm = windowManager ?: getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        if (panelView != null && panelView?.parent != null) {
-            try {
-                wm.removeView(panelView)
-            } catch (e: Exception) {}
-        }
-        if (bubbleView != null && bubbleView?.parent != null) {
-            try {
-                wm.removeView(bubbleView)
-            } catch (e: Exception) {}
-        }
+        if (panelView?.parent != null) runCatching { wm.removeView(panelView) }
+        if (bubbleView?.parent != null) runCatching { wm.removeView(bubbleView) }
     }
 
     private fun toggleControlPanel() {
         val wm = windowManager ?: getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = resources.displayMetrics
-        val dpToPx = { dp: Int -> (dp * metrics.density).toInt() }
-
-        if (panelView != null && panelView?.parent != null) {
-            try {
-                wm.removeView(panelView)
-            } catch (e: Exception) {}
-        } else {
-            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            } else {
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE
-            }
-
-            if (panelParams == null) {
-                panelParams = WindowManager.LayoutParams(
-                    dpToPx(210),
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    layoutType,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT
-                ).apply {
-                    gravity = Gravity.TOP or Gravity.START
-                }
-            }
-
-            panelParams?.x = bubbleParams?.x ?: 100
-            panelParams?.y = (bubbleParams?.y ?: 300) + (bubbleView?.height ?: dpToPx(50)) + dpToPx(8)
-
-            // Update UI toggles to current states
-            listeningSwitch?.isChecked = isVoiceControlActive
-            val prefs = getSharedPreferences("voice_reels_prefs", Context.MODE_PRIVATE)
-            silenceSwitch?.isChecked = prefs.getBoolean("mute_voice_beeps", true)
-
-            try {
-                wm.addView(panelView, panelParams)
-            } catch (e: Exception) {}
+        if (panelView?.parent != null) {
+            runCatching { wm.removeView(panelView) }
+            return
         }
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+        if (panelParams == null) {
+            panelParams = WindowManager.LayoutParams(
+                dp(210),
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                layoutType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply { gravity = Gravity.TOP or Gravity.START }
+        }
+        panelParams?.x = bubbleParams?.x ?: 100
+        panelParams?.y = (bubbleParams?.y ?: 300) + (bubbleView?.height ?: dp(50)) + dp(8)
+        listeningSwitch?.isChecked = isVoiceControlActive
+        silenceSwitch?.isChecked = prefs().getBoolean("mute_voice_beeps", true)
+        runCatching { wm.addView(panelView, panelParams) }
     }
 
+    // endregion
+
+    private fun prefs(): SharedPreferences =
+        getSharedPreferences("voice_reels_prefs", Context.MODE_PRIVATE)
+
     override fun onDestroy() {
-        isServiceRunning = false
+        _isRunning.value = false
+        _status.value = "Service not running"
         stopListening()
         hideFloatingViews()
-        val prefs = getSharedPreferences("voice_reels_prefs", Context.MODE_PRIVATE)
-        prefs.unregisterOnSharedPreferenceChangeListener(preferenceListener)
+        runCatching { prefs().unregisterOnSharedPreferenceChangeListener(preferenceListener) }
         instance = null
         super.onDestroy()
     }
