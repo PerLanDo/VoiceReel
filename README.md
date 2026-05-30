@@ -22,10 +22,30 @@ Everything runs **on-device**: there is no backend, no API key, and no account.
 
 Natural phrases work too — e.g. *"go to the next one"* or *"I love this"*.
 
+## Hearing you over the video & responding fast
+
+Recognizing speech while a loud video plays is the hard part. Voice Reels tackles it on three fronts:
+
+- **Ducks the video audio while listening.** When voice control is on, Voice Reels holds transient
+  audio focus so the foreground app lowers (ducks) its volume, letting the microphone pick up your
+  voice clearly. You can turn this off under *Listening & performance → Lower video volume while
+  listening*.
+- **Acts on partial results.** Commands fire the **instant** a matching word is detected in the
+  recognizer's partial output, instead of waiting for you to finish a sentence. Restart latency
+  between listening cycles is kept to a fraction of a second so it feels continuous.
+- **Sensitive, fuzzy matching.** The parser understands command synonyms, common mis-hearings
+  (e.g. *"necks"* → next, *"lake"* → like), and near-miss words via edit-distance matching — so a
+  word that merely *sounds like* a command still triggers immediately. It also prefers the fast,
+  network-free on-device recognition engine when available.
+
+The system recognition "beep" can also be muted (*Listening & performance → Silence recognition
+beeps*).
+
 ## How it works
 
 - A continuously-running **`SpeechRecognizer`** inside the Accessibility Service captures your voice.
-- Recognized speech is mapped to a command by a small, unit-tested parser (`VoiceCommand.kt`).
+- Recognized speech (and its alternative hypotheses) is mapped to a command by a small, unit-tested
+  parser (`VoiceCommand.kt`) with synonym, homophone, and fuzzy matching.
 - The service dispatches the gesture for the active app:
   - **Next / Previous** → a vertical swipe (works the same across all four apps).
   - **Play / Pause** → a single center tap.
@@ -71,11 +91,12 @@ Open Voice Reels and complete the three setup steps on the home screen:
    This is what lets the app scroll/tap inside other apps for you.
 3. **Background voice control** — flip the switch to start listening.
 
-Optional:
+Under **Listening & performance** you can fine-tune behavior:
 
+- **Lower video volume while listening** (on by default) — ducks the video so your voice is heard.
+- **Silence recognition beeps** — mutes the system beeps that play when listening starts.
 - **Floating controls bubble** — a draggable, always-on-top widget with manual Prev/Next/Play/Like
   buttons. Requires the "Display over other apps" permission.
-- **Silence recognition beeps** — mutes the system beeps that play when listening starts.
 
 Then open TikTok, Instagram Reels, Facebook Reels, or YouTube Shorts (the home screen has quick
 launch buttons) and use the voice commands.
@@ -94,13 +115,14 @@ launch buttons) and use the voice commands.
 ```
 app/src/main/java/com/example/
 ├── MainActivity.kt                     # Compose setup / control-center UI
-├── VoiceCommand.kt                     # Command enum + pure, unit-tested parser
-└── VoiceReelsAccessibilityService.kt   # Background listening, gestures, app-aware Like, overlay
+├── VoiceCommand.kt                     # Command enum + pure, unit-tested parser (synonyms/fuzzy)
+└── VoiceReelsAccessibilityService.kt   # Background listening, audio ducking, gestures, overlay
 ```
 
 ## Testing
 
-Unit tests cover the command parser (`VoiceCommandParserTest`) and basic app resources. Run them with:
+Unit tests cover the command parser (`VoiceCommandParserTest`, including synonym/homophone/fuzzy
+cases) and basic app resources. Run them with:
 
 ```bash
 ./gradlew testDebugUnitTest
@@ -109,8 +131,12 @@ Unit tests cover the command parser (`VoiceCommandParserTest`) and basic app res
 ## Known limitations
 
 - Continuous background recognition uses battery; turn off background voice control when you're done.
+- Audio ducking lowers the video volume while listening. Well-behaved apps duck rather than pause; if
+  a particular app pauses instead, turn the option off.
 - Gesture targeting is coordinate-based for scroll/play and works across phones, but heavily
   customized device skins or unusual layouts may need different swipe zones.
+- Because matching is intentionally sensitive, an unrelated word that sounds like a command can
+  occasionally trigger an action.
 - While Voice Reels is listening it holds the microphone, so apps that record audio at the same time
   may conflict.
 
