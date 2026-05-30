@@ -111,7 +111,7 @@ Under **Listening & performance** you can fine-tune behavior:
   **Floating bubble** off to hide the widget entirely.
 
 Then open TikTok, Instagram Reels, Facebook Reels, or YouTube Shorts (the home screen has quick
-launch buttons) and use the voice commands.
+launch buttons that deep-link to short-video feeds when possible) and use the voice commands.
 
 ## Permissions
 

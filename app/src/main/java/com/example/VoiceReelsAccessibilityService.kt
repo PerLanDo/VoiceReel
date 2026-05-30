@@ -685,6 +685,18 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 textSize = 20f
                 gravity = Gravity.CENTER
             })
+            container.addView(TextView(context).apply {
+                text = "✕"
+                textSize = 10f
+                setTextColor(0xFF94A3B8.toInt())
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(2), dp(4), dp(2))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.END
+                )
+            })
             container.setOnTouchListener(object : View.OnTouchListener {
                 private var initialX = 0
                 private var initialY = 0
@@ -717,7 +729,15 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                             return true
                         }
                         MotionEvent.ACTION_UP -> {
-                            if (!dragging) toggleControlPanel()
+                            if (!dragging) {
+                                val closeArea = dp(22)
+                                val hitClose = event.x >= (v.width - closeArea) && event.y <= closeArea
+                                if (hitClose) {
+                                    dismissFloatingOverlay()
+                                } else {
+                                    toggleControlPanel()
+                                }
+                            }
                             return true
                         }
                     }
@@ -793,6 +813,13 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
             panelView = root
         }
+    }
+
+    private fun dismissFloatingOverlay() {
+        prefs().edit().putBoolean("show_floating_overlay", false).apply()
+        isOverlayEnabled = false
+        overlaySwitch?.isChecked = false
+        hideFloatingViews()
     }
 
     private fun divider(): View = View(this).apply {
