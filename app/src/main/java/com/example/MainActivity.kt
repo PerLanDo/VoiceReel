@@ -603,7 +603,7 @@ private fun switchColors() = SwitchDefaults.colors(
 private data class AppEntry(
     val name: String,
     val pkg: String,
-    val targetUrl: String,
+    val deepLinkUrl: String,
     val altPkg: String? = null
 )
 
@@ -611,7 +611,7 @@ private fun launchApp(context: Context, app: AppEntry) {
     val pm = context.packageManager
     val installedPkg = listOfNotNull(app.pkg, app.altPkg)
         .firstOrNull { pkg -> pm.getLaunchIntentForPackage(pkg) != null }
-    val deepLinkIntent = Intent(Intent.ACTION_VIEW, Uri.parse(app.targetUrl)).apply {
+    val deepLinkIntent = Intent(Intent.ACTION_VIEW, Uri.parse(app.deepLinkUrl)).apply {
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }
     runCatching {
@@ -640,7 +640,7 @@ private fun launchApp(context: Context, app: AppEntry) {
             else -> false
         }
         if (!launched) {
-            error("No launch target")
+            error("Unable to launch ${app.name}: no installed app or browser handler found")
         }
     }.onFailure {
         Toast.makeText(context, "Could not open ${app.name}", Toast.LENGTH_SHORT).show()

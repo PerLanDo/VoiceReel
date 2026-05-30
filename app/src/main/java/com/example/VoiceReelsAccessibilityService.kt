@@ -81,6 +81,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         private const val RESTART_AFTER_ERROR_MS = 300L
         private const val RESTART_AFTER_BUSY_MS = 1000L
         private const val BUBBLE_CLOSE_HIT_AREA_DP = 22
+        private const val BUBBLE_CLOSE_TEXT_COLOR = 0xFF94A3B8.toInt()
 
         /** Fraction of the user's media volume while continuously listening. */
         private const val LISTENING_VOLUME_FRACTION = 0.18f
@@ -689,7 +690,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             container.addView(TextView(context).apply {
                 text = "✕"
                 textSize = 10f
-                setTextColor(0xFF94A3B8.toInt())
+                setTextColor(BUBBLE_CLOSE_TEXT_COLOR)
                 contentDescription = "Close floating bubble"
                 gravity = Gravity.CENTER
                 setPadding(dp(4), dp(2), dp(4), dp(2))
