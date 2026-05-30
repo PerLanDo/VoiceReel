@@ -10,11 +10,14 @@ import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -35,17 +38,19 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.Locale
 
 /**
  * The heart of Voice Reels.
  *
- * This Accessibility Service listens for voice commands in the background and translates them into
- * swipe / tap gestures (and, where possible, real "like" button clicks) on whatever short-video app
- * is currently in the foreground — TikTok, Instagram Reels, Facebook Reels or YouTube Shorts.
+ * Listens for voice commands in the background and translates them into swipe / tap gestures (and,
+ * where possible, real "like" button clicks) on whatever short-video app is in the foreground —
+ * TikTok, Instagram Reels, Facebook Reels or YouTube Shorts.
  *
- * It only inspects the foreground package name to choose the right "like" strategy, and only reads
- * the on-screen node tree on demand when a "like" command is issued for an app that does not support
- * double-tap-to-like (currently YouTube). It never stores screen content.
+ * To stay responsive while a video is playing it:
+ *  - ducks the foreground app's audio while listening (so the mic mostly hears you),
+ *  - prefers fast on-device recognition, and
+ *  - acts on *partial* results the instant a command-like word is detected.
  */
 class VoiceReelsAccessibilityService : AccessibilityService() {
 
@@ -59,6 +64,15 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         val SUPPORTED_PACKAGES = setOf(
             PKG_TIKTOK, PKG_TIKTOK_ALT, PKG_YOUTUBE, PKG_INSTAGRAM, PKG_FACEBOOK
         )
+
+        // How long the same command is suppressed after firing, to avoid double-triggering from
+        // the partial-then-final result of a single utterance.
+        private const val COMMAND_COOLDOWN_MS = 1100L
+
+        // Restart cadence — kept short so listening feels continuous and snappy.
+        private const val RESTART_AFTER_RESULT_MS = 200L
+        private const val RESTART_AFTER_ERROR_MS = 300L
+        private const val RESTART_AFTER_BUSY_MS = 1000L
 
         private var instance: VoiceReelsAccessibilityService? = null
 
@@ -77,14 +91,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         private val _foregroundApp = MutableStateFlow<String?>(null)
         val foregroundApp: StateFlow<String?> = _foregroundApp.asStateFlow()
 
-        /** Toggled from the UI. Drives whether the service is actively listening. */
         var isVoiceControlActive: Boolean = false
             set(value) {
                 field = value
                 instance?.toggleListeningState(value)
             }
 
-        /** Toggled from the UI. Drives the floating control bubble. */
         var isOverlayEnabled: Boolean = false
             set(value) {
                 field = value
@@ -98,6 +110,16 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     private var currentPackage: String? = null
 
+    // Per-utterance / dedupe bookkeeping.
+    private var utteranceConsumed = false
+    private var lastFiredCommand = VoiceCommand.NONE
+    private var lastFiredAt = 0L
+
+    // Audio ducking.
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var hasAudioFocus = false
+    private var isQuietModeActive = false
+
     // Overlay components
     private var windowManager: WindowManager? = null
     private var bubbleView: View? = null
@@ -106,8 +128,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var panelParams: WindowManager.LayoutParams? = null
     private var listeningSwitch: Switch? = null
     private var silenceSwitch: Switch? = null
-
-    private var isQuietModeActive = false
 
     private val preferenceListener =
         SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
@@ -139,7 +159,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val pkg = event.packageName?.toString() ?: return
-            // Ignore our own UI and system UI churn.
             if (pkg == packageName) return
             currentPackage = pkg
             _foregroundApp.value = pkg
@@ -174,6 +193,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         muteSystemSoundsIfRequested()
+        acquireAudioDucking()
 
         try {
             if (speechRecognizer == null) {
@@ -182,22 +202,41 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 }
             }
             if (recognizerIntent == null) {
-                recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(
-                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                    )
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                }
+                recognizerIntent = buildRecognizerIntent()
             }
+            utteranceConsumed = false
             speechRecognizer?.startListening(recognizerIntent)
             _isListening.value = true
             _status.value = "Listening…"
         } catch (e: Exception) {
             _status.value = "Could not start microphone"
+            scheduleRestart(RESTART_AFTER_ERROR_MS)
         }
     }
+
+    private fun buildRecognizerIntent(): Intent =
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            // Several hypotheses give the fuzzy matcher more to work with.
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+            // Favor the fast, network-free on-device engine when available.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
+            // Finalize quickly so short single-word commands return fast.
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                450L
+            )
+        }
 
     private fun stopListening() {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -205,7 +244,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             return
         }
         try {
-            speechRecognizer?.stopListening()
+            speechRecognizer?.cancel()
             speechRecognizer?.destroy()
         } catch (e: Exception) {
             // ignore
@@ -213,6 +252,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         speechRecognizer = null
         _isListening.value = false
         if (_isRunning.value) _status.value = "Paused"
+        releaseAudioDucking()
         restoreSystemSounds()
     }
 
@@ -224,43 +264,118 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     }
 
     private fun createSpeechListener(): RecognitionListener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) { _status.value = "Listening…" }
+        override fun onReadyForSpeech(params: Bundle?) {
+            utteranceConsumed = false
+            _status.value = "Listening…"
+        }
+
         override fun onBeginningOfSpeech() { _status.value = "Hearing you…" }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() { _status.value = "Processing…" }
 
         override fun onError(error: Int) {
-            // No match / timeout are normal during quiet periods; just loop again.
-            val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 2500L else 1200L
             _isListening.value = false
+            val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                RESTART_AFTER_BUSY_MS
+            } else {
+                RESTART_AFTER_ERROR_MS
+            }
             scheduleRestart(delay)
         }
 
-        override fun onResults(results: Bundle?) {
-            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            if (!matches.isNullOrEmpty()) handleSpeech(matches[0])
-            _isListening.value = false
-            scheduleRestart(800L)
+        override fun onPartialResults(partialResults: Bundle?) {
+            tryFireFrom(partialResults)
         }
 
-        override fun onPartialResults(partialResults: Bundle?) {}
+        override fun onResults(results: Bundle?) {
+            if (!tryFireFrom(results)) {
+                val first = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                if (!first.isNullOrBlank()) _lastCommand.value = "\"$first\""
+            }
+            _isListening.value = false
+            scheduleRestart(RESTART_AFTER_RESULT_MS)
+        }
+
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
-    private fun handleSpeech(heard: String) {
-        when (VoiceCommandParser.parse(heard)) {
+    /** Returns true if a command was fired from the given results bundle. */
+    private fun tryFireFrom(results: Bundle?): Boolean {
+        if (utteranceConsumed) return false
+        val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            ?: return false
+        val command = VoiceCommandParser.parse(candidates)
+        if (command == VoiceCommand.NONE) return false
+        fireCommand(command, candidates.firstOrNull().orEmpty())
+        return true
+    }
+
+    private fun fireCommand(command: VoiceCommand, heard: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (command == lastFiredCommand && now - lastFiredAt < COMMAND_COOLDOWN_MS) return
+        lastFiredCommand = command
+        lastFiredAt = now
+        utteranceConsumed = true
+
+        when (command) {
             VoiceCommand.NEXT -> { announce("Next ⬇️", heard); swipeUp() }
             VoiceCommand.PREVIOUS -> { announce("Previous ⬆️", heard); swipeDown() }
             VoiceCommand.PLAY_PAUSE -> { announce("Play / Pause ⏯️", heard); performTap() }
             VoiceCommand.LIKE -> { announce("Like ❤️", heard); doLike() }
-            VoiceCommand.NONE -> { _lastCommand.value = "\"$heard\"" }
+            VoiceCommand.NONE -> {}
         }
     }
 
     private fun announce(action: String, heard: String) {
-        _lastCommand.value = "$action  ·  heard \"$heard\""
+        _lastCommand.value = if (heard.isBlank()) action else "$action  ·  \"$heard\""
         showMatchToast(action)
+    }
+
+    // endregion
+
+    // region Audio ducking ---------------------------------------------------------------------
+
+    private fun acquireAudioDucking() {
+        if (hasAudioFocus) return
+        if (!prefs().getBoolean("duck_media_audio", true)) return
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            val request = AudioFocusRequest.Builder(
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            )
+                .setAudioAttributes(attrs)
+                .setWillPauseWhenDucked(false)
+                .build()
+            audioFocusRequest = request
+            am.requestAudioFocus(request)
+        } else {
+            @Suppress("DEPRECATION")
+            am.requestAudioFocus(
+                null,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            )
+        }
+        hasAudioFocus = granted == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+
+    private fun releaseAudioDucking() {
+        if (!hasAudioFocus) return
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.abandonAudioFocus(null)
+        }
+        hasAudioFocus = false
     }
 
     // endregion
@@ -270,7 +385,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private fun screenWidth() = resources.displayMetrics.widthPixels.toFloat()
     private fun screenHeight() = resources.displayMetrics.heightPixels.toFloat()
 
-    private fun dispatchSwipe(startYFraction: Float, endYFraction: Float, durationMs: Long = 260L) {
+    private fun dispatchSwipe(startYFraction: Float, endYFraction: Float, durationMs: Long = 220L) {
         val x = screenWidth() / 2f
         val path = Path().apply {
             moveTo(x, screenHeight() * startYFraction)
@@ -316,13 +431,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }, null)
     }
 
-    /**
-     * TikTok / Instagram / Facebook reliably "like" on a center double-tap. YouTube uses the
-     * double-tap to seek, so for YouTube we try to find and click the real Like button instead.
-     */
     private fun doLike() {
-        val pkg = currentPackage
-        if (pkg == PKG_YOUTUBE) {
+        if (currentPackage == PKG_YOUTUBE) {
             if (!clickLikeButton()) performDoubleTap()
         } else {
             performDoubleTap()
@@ -366,6 +476,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     // region System sound muting ---------------------------------------------------------------
 
     private fun muteSystemSoundsIfRequested() {
+        if (isQuietModeActive) return
         if (!prefs().getBoolean("mute_voice_beeps", true)) return
         try {
             val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
