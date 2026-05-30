@@ -14,7 +14,7 @@ class VoiceCommandParserTest {
 
   @Test
   fun `previous synonyms map to PREVIOUS`() {
-    listOf("previous", "go back", "prev", "scroll up", "last one").forEach {
+    listOf("previous", "go back", "prev", "scroll up", "last one", "rewind").forEach {
       assertEquals("'$it'", VoiceCommand.PREVIOUS, VoiceCommandParser.parse(it))
     }
   }
@@ -34,11 +34,40 @@ class VoiceCommandParserTest {
   }
 
   @Test
+  fun `homophones are recognized`() {
+    assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("necks"))
+    assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("text"))
+    assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("lake"))
+    assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("bike"))
+    assertEquals(VoiceCommand.PREVIOUS, VoiceCommandParser.parse("black"))
+  }
+
+  @Test
+  fun `fuzzy matching catches near-miss words`() {
+    assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("skipp"))
+    assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("lik"))
+    assertEquals(VoiceCommand.PLAY_PAUSE, VoiceCommandParser.parse("pawse"))
+  }
+
+  @Test
+  fun `parses across multiple candidates`() {
+    assertEquals(
+      VoiceCommand.NEXT,
+      VoiceCommandParser.parse(listOf("nonsense word", "go next now"))
+    )
+    assertEquals(
+      VoiceCommand.LIKE,
+      VoiceCommandParser.parse(listOf("blah", "lake"))
+    )
+  }
+
+  @Test
   fun `unrelated speech maps to NONE`() {
-    listOf("hello there", "what time is it", "", "   ").forEach {
+    listOf("hello there", "what time is it", "weather today", "", "   ").forEach {
       assertEquals("'$it'", VoiceCommand.NONE, VoiceCommandParser.parse(it))
     }
     assertEquals(VoiceCommand.NONE, VoiceCommandParser.parse(null))
+    assertEquals(VoiceCommand.NONE, VoiceCommandParser.parse(listOf<String?>(null, "")))
   }
 
   @Test
