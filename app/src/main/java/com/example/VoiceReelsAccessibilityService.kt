@@ -23,6 +23,9 @@ import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.animation.ObjectAnimator
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -39,6 +42,7 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.sin
 import java.util.Locale
 
 /**
@@ -54,6 +58,62 @@ import java.util.Locale
  * repeating an action when a word is heard several times, each command is rate-limited by a
  * configurable cooldown.
  */
+
+/**
+ * Custom view that renders animated wave patterns
+ */
+class WaveView(context: android.content.Context) : View(context) {
+    private var phase = 0f
+    private val paint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        color = 0xFF38BDF8.toInt()
+        isAntiAlias = true
+    }
+    
+    private var animator: ObjectAnimator? = null
+    
+    init {
+        startAnimation()
+    }
+    
+    private fun startAnimation() {
+        animator = ObjectAnimator.ofFloat(this, "phase", 0f, 360f).apply {
+            duration = 2000L
+            repeatCount = ObjectAnimator.INFINITE
+            start()
+        }
+    }
+    
+    /**
+     * Sets the animation phase value. This is called by ObjectAnimator to update
+     * the wave animation. The phase value cycles from 0 to 360 degrees continuously.
+     */
+    fun setPhase(value: Float) {
+        phase = value % 360f
+        invalidate()
+    }
+    
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val centerX = width / 2f
+        val centerY = height / 2f
+        val maxRadius = minOf(width, height) / 2f - 4f
+        
+        // Draw multiple wave rings
+        for (i in 0..WAVE_RING_COUNT - 1) {
+            val radius = maxRadius * (0.3f + i * 0.25f)
+            val alpha = (255 * (1f - i * 0.25f)).toInt()
+            paint.alpha = alpha
+            canvas.drawCircle(centerX, centerY, radius, paint)
+        }
+    }
+    
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        animator?.cancel()
+    }
+}
 class VoiceReelsAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -80,19 +140,19 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         private const val RESTART_AFTER_RESULT_MS = 200L
         private const val RESTART_AFTER_ERROR_MS = 300L
         private const val RESTART_AFTER_BUSY_MS = 1000L
-<<<<<<< HEAD
-        private const val BUBBLE_CLOSE_HIT_AREA_DP = 28
-        private const val BUBBLE_CLOSE_TEXT_COLOR = 0xFF94A3B8.toInt()
-=======
         private const val LISTENING_WATCHDOG_CHECK_MS = 5000L
         private const val LISTENING_STALE_TIMEOUT_MS = 15000L
->>>>>>> origin/main
 
         /** Fraction of the user's media volume while continuously listening. */
         private const val LISTENING_VOLUME_FRACTION = 0.18f
 
         /** Cap during active speech — near-mute so loud reel audio cannot mask commands. */
         private const val SPEECH_BURST_MAX_VOLUME = 1
+        
+        // Floating bubble animation and display constants
+        private const val WAVE_RING_COUNT = 3
+        private const val COMMAND_DISPLAY_DURATION_MS = 3000L
+        private const val COMMAND_POLL_INTERVAL_MS = 100L
 
         private var instance: VoiceReelsAccessibilityService? = null
 
@@ -127,10 +187,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var recognizerIntent: Intent? = null
     private val handler = Handler(Looper.getMainLooper())
-<<<<<<< HEAD
-=======
     private var lastRecognizerActivityAt = 0L
->>>>>>> origin/main
 
     private var currentPackage: String? = null
 
@@ -172,9 +229,10 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var listeningSwitch: Switch? = null
     private var silenceSwitch: Switch? = null
     private var overlaySwitch: Switch? = null
+    private var commandDisplayView: TextView? = null
+    private var commandUpdateRunnable: Runnable? = null
+    private var commandClearRunnable: Runnable? = null
 
-<<<<<<< HEAD
-=======
     private val restartListeningRunnable = Runnable {
         if (isVoiceControlActive && _isRunning.value) startListening()
     }
@@ -198,7 +256,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
     }
 
->>>>>>> origin/main
     private val preferenceListener =
         SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
             when (key) {
@@ -257,11 +314,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             handler.post { startListening() }
             return
         }
-<<<<<<< HEAD
-=======
         handler.removeCallbacks(restartListeningRunnable)
         if (_isListening.value) return
->>>>>>> origin/main
         val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (!hasMic) {
@@ -286,11 +340,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 recognizerIntent = buildRecognizerIntent()
             }
             utteranceConsumed = false
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
             scheduleListeningWatchdog()
->>>>>>> origin/main
             speechRecognizer?.startListening(recognizerIntent)
             _isListening.value = true
             _status.value = "Listening…"
@@ -334,20 +385,10 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             handler.post { stopListening() }
             return
         }
-<<<<<<< HEAD
-        try {
-            speechRecognizer?.cancel()
-            speechRecognizer?.destroy()
-        } catch (e: Exception) {
-            // ignore
-        }
-        speechRecognizer = null
-=======
         handler.removeCallbacks(restartListeningRunnable)
         handler.removeCallbacks(listeningWatchdogRunnable)
         lastRecognizerActivityAt = 0L
         resetRecognizer()
->>>>>>> origin/main
         _isListening.value = false
         if (_isRunning.value) _status.value = "Paused"
         releaseAudioDucking()
@@ -356,11 +397,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     private fun scheduleRestart(delayMs: Long) {
         if (!isVoiceControlActive || !_isRunning.value) return
-<<<<<<< HEAD
-        handler.postDelayed({
-            if (isVoiceControlActive && _isRunning.value) startListening()
-        }, delayMs)
-=======
         handler.removeCallbacks(restartListeningRunnable)
         handler.postDelayed(restartListeningRunnable, delayMs)
     }
@@ -384,15 +420,11 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             // ignore
         }
         speechRecognizer = null
->>>>>>> origin/main
     }
 
     private fun createSpeechListener(): RecognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             utteranceConsumed = false
             speechBurstAttenuation = false
             refreshMediaVolumeIsolation(deepDip = false)
@@ -400,20 +432,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         override fun onBeginningOfSpeech() {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             speechBurstAttenuation = true
             refreshMediaVolumeIsolation(deepDip = true)
             _status.value = "Hearing you…"
         }
 
         override fun onRmsChanged(rmsdB: Float) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             // While the user is speaking, keep video audio ducked to the floor so dialog/SFX
             // in the reel does not drown out the command.
             if (speechBurstAttenuation && rmsdB > 2f) {
@@ -423,20 +449,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             speechBurstAttenuation = false
             refreshMediaVolumeIsolation(deepDip = false)
             _status.value = "Processing…"
         }
 
         override fun onError(error: Int) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             _isListening.value = false
             val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                 RESTART_AFTER_BUSY_MS
@@ -447,18 +467,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             tryFireFrom(partialResults)
         }
 
         override fun onResults(results: Bundle?) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             if (!tryFireFrom(results)) {
                 val first = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -774,6 +788,13 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         handler.post { if (show) showFloatingViews() else hideFloatingViews() }
     }
 
+    private fun dismissFloatingOverlay() {
+        prefs().edit().putBoolean("show_floating_overlay", false).apply()
+        isOverlayEnabled = false
+        overlaySwitch?.isChecked = false
+        hideFloatingViews()
+    }
+
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     private fun createBubbleAndPanelViews() {
@@ -788,32 +809,66 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 }
                 setPadding(dp(12), dp(12), dp(12), dp(12))
             }
+            
+            // Add wave animation view
+            val waveView = WaveView(context).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            container.addView(waveView)
+            
+            // Add microphone icon
             container.addView(TextView(context).apply {
                 text = "🎙️"
                 textSize = 20f
                 gravity = Gravity.CENTER
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    Gravity.CENTER
+                )
             })
-<<<<<<< HEAD
+            
+            // Add close button (X)
             container.addView(TextView(context).apply {
                 text = "✕"
                 textSize = 14f
-                setTextColor(BUBBLE_CLOSE_TEXT_COLOR)
-                contentDescription = "Dismiss bubble"
+                setTextColor(0xFF94A3B8.toInt())
+                contentDescription = "Close bubble"
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { dismissFloatingOverlay() }
                 gravity = Gravity.CENTER
                 setPadding(dp(4), dp(2), dp(4), dp(2))
-                minWidth = dp(BUBBLE_CLOSE_HIT_AREA_DP)
-                minHeight = dp(BUBBLE_CLOSE_HIT_AREA_DP)
+                minWidth = dp(28)
+                minHeight = dp(28)
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.TOP or Gravity.END
                 )
             })
-=======
->>>>>>> origin/main
+            
+            // Add command display view
+            val commandDisplay = TextView(context).apply {
+                text = ""
+                textSize = 10f
+                setTextColor(0xFF38BDF8.toInt())
+                gravity = Gravity.START or Gravity.TOP
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                layoutParams = FrameLayout.LayoutParams(
+                    dp(120),
+                    dp(40),
+                    Gravity.BOTTOM or Gravity.START
+                )
+            }
+            container.addView(commandDisplay)
+            commandDisplayView = commandDisplay
+            
             container.setOnTouchListener(object : View.OnTouchListener {
                 private var initialX = 0
                 private var initialY = 0
@@ -846,23 +901,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                             return true
                         }
                         MotionEvent.ACTION_UP -> {
-<<<<<<< HEAD
-                            if (!dragging) {
-                                val closeArea = dp(BUBBLE_CLOSE_HIT_AREA_DP)
-                                val location = IntArray(2)
-                                v.getLocationOnScreen(location)
-                                val localX = event.rawX - location[0]
-                                val localY = event.rawY - location[1]
-                                val hitClose = localX >= (v.width - closeArea) && localY <= closeArea
-                                if (hitClose) {
-                                    dismissFloatingOverlay()
-                                } else {
-                                    toggleControlPanel()
-                                }
-                            }
-=======
                             if (!dragging) toggleControlPanel()
->>>>>>> origin/main
                             return true
                         }
                     }
@@ -940,16 +979,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
     }
 
-<<<<<<< HEAD
-    private fun dismissFloatingOverlay() {
-        prefs().edit().putBoolean("show_floating_overlay", false).apply()
-        isOverlayEnabled = false
-        overlaySwitch?.isChecked = false
-        hideFloatingViews()
-    }
-
-=======
->>>>>>> origin/main
     private fun divider(): View = View(this).apply {
         setBackgroundColor(0xFF334155.toInt())
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
@@ -1044,12 +1073,54 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         createBubbleAndPanelViews()
         if (bubbleView?.parent != null) runCatching { wm.removeView(bubbleView) }
         runCatching { wm.addView(bubbleView, bubbleParams) }
+        
+        // Start listening for command updates
+        startCommandDisplayListener()
     }
 
     private fun hideFloatingViews() {
         val wm = windowManager ?: getSystemService(Context.WINDOW_SERVICE) as WindowManager
         if (panelView?.parent != null) runCatching { wm.removeView(panelView) }
         if (bubbleView?.parent != null) runCatching { wm.removeView(bubbleView) }
+        
+        // Clean up runnables to prevent memory leaks
+        commandUpdateRunnable?.let { handler.removeCallbacks(it) }
+        commandClearRunnable?.let { handler.removeCallbacks(it) }
+        commandUpdateRunnable = null
+        commandClearRunnable = null
+    }
+    
+    private fun startCommandDisplayListener() {
+        handler.post {
+            // Cancel any existing listener
+            commandUpdateRunnable?.let { handler.removeCallbacks(it) }
+            
+            // Setup listener for command updates
+            val commandUpdateRunnable = object : Runnable {
+                override fun run() {
+                    val currentCommand = _lastCommand.value
+                    if (currentCommand != null && currentCommand.isNotEmpty()) {
+                        commandDisplayView?.text = currentCommand
+                        
+                        // Cancel any pending clear runnable
+                        commandClearRunnable?.let { handler.removeCallbacks(it) }
+                        
+                        // Schedule new clear runnable
+                        val clearRunnable = Runnable {
+                            if (commandDisplayView?.text == currentCommand) {
+                                commandDisplayView?.text = ""
+                            }
+                        }
+                        commandClearRunnable = clearRunnable
+                        handler.postDelayed(clearRunnable, COMMAND_DISPLAY_DURATION_MS)
+                    }
+                    // Re-schedule this runnable to continue polling
+                    handler.postDelayed(this, COMMAND_POLL_INTERVAL_MS)
+                }
+            }
+            this@VoiceReelsAccessibilityService.commandUpdateRunnable = commandUpdateRunnable
+            commandUpdateRunnable.run()
+        }
     }
 
     private fun toggleControlPanel() {
