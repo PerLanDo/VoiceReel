@@ -1,88 +1,123 @@
 # Voice Reels
 
-Voice Reels is a hands-free, voice-controlled short-video experience for Android. It ships with
-two things:
+Voice Reels is a **hands-free voice controller for short-video apps**. Enable it once, then scroll,
+play/pause, and like videos in **TikTok, Instagram Reels, Facebook Reels, and YouTube Shorts** using
+only your voice — no tapping required.
 
-1. **A built-in reels simulator** — a clean, minimalist TikTok-style vertical feed (rendered with
-   procedurally animated Compose canvases, so no network or media files are required) that you can
-   scroll, play/pause, and like entirely with your voice.
-2. **A system-wide voice assistant** — an optional Accessibility Service that lets you control
-   *other* shorts/reels apps (TikTok, YouTube Shorts, Instagram Reels, Facebook Reels) hands-free by
-   performing swipe and tap gestures on your behalf.
+It works by running on-device speech recognition in the background and performing the matching
+swipe/tap gestures on whatever app you're watching, through Android's Accessibility framework.
+Everything runs **on-device**: there is no backend, no API key, and no account.
 
-Everything runs **on-device**. The app uses Android's built-in `SpeechRecognizer`; there is no
-backend, no API key, and no account required.
+> Earlier versions of this project shipped an in-app "reels simulator". That demo feed has been
+> removed — Voice Reels is now a focused controller for real apps.
 
 ## Voice commands
 
 | Say… | Action |
 | --- | --- |
-| "Next", "Down", "Skip", "Forward" | Go to the next video |
-| "Prev", "Previous", "Back", "Up" | Go to the previous video |
-| "Play", "Start", "Resume", "Go" | Resume playback |
-| "Pause", "Stop", "Wait", "Hold" | Pause playback |
+| "Next", "Down", "Skip", "Forward" | Scroll to the next video |
+| "Previous", "Back", "Up", "Last" | Scroll to the previous video |
+| "Play", "Pause", "Stop", "Resume" | Tap center to toggle playback |
 | "Like", "Love", "Heart", "Favorite" | Like the current video |
 
-In the in-app simulator you can also tap the on-screen command buttons (Play / Pause / Next / Prev /
-Like) to trigger the same actions without speaking — handy for testing in noisy environments.
+Natural phrases work too — e.g. *"go to the next one"* or *"I love this"*.
+
+## How it works
+
+- A continuously-running **`SpeechRecognizer`** inside the Accessibility Service captures your voice.
+- Recognized speech is mapped to a command by a small, unit-tested parser (`VoiceCommand.kt`).
+- The service dispatches the gesture for the active app:
+  - **Next / Previous** → a vertical swipe (works the same across all four apps).
+  - **Play / Pause** → a single center tap.
+  - **Like** → a center double-tap on TikTok / Instagram / Facebook (their standard "like" gesture).
+    On **YouTube Shorts**, double-tap is used for seeking, so Voice Reels instead finds and clicks
+    the real *Like* button via the accessibility node tree, falling back to a double-tap if it can't.
+- It tracks only the **foreground package name** to pick the right Like strategy. It does not store
+  screen content; the node tree is only read on demand when you say "like" in YouTube.
 
 ## Requirements
 
 - [Android Studio](https://developer.android.com/studio) (latest stable)
-- JDK 11+ (bundled with Android Studio)
-- An emulator or device running Android 7.0 (API 24) or higher
+- A **physical device** running Android 7.0 (API 24) or higher
 
-> **Voice recognition note:** Android emulators usually do not provide a speech recognition engine,
-> so the spoken commands will not be captured there. Use the on-screen command buttons to test the
-> simulator on an emulator, and use a physical device to try real voice control.
+> **Why a physical device?** Most Android emulators don't ship a speech-recognition engine, and the
+> target apps (TikTok, etc.) aren't installed on them. Use a real phone to actually try voice control.
+> The floating-bubble manual buttons can be used to test gestures without speaking.
 
 ## Run locally
 
 1. Open Android Studio and choose **Open**, then select this project directory.
 2. Let Android Studio sync Gradle and install any missing SDK components when prompted.
-3. Run the **app** configuration on an emulator or a connected device.
+3. Run the **app** configuration on a connected device.
 
-The debug build is signed automatically with Android's managed debug keystore, so no extra setup is
-needed.
+The debug build is signed automatically with Android's managed debug keystore — no setup required.
 
 ### Build from the command line
 
 ```bash
 ./gradlew assembleDebug        # builds app/build/outputs/apk/debug/app-debug.apk
 ./gradlew testDebugUnitTest    # runs the unit tests
-./gradlew installDebug         # installs onto a running device/emulator
+./gradlew installDebug         # installs onto a connected device
 ```
 
-## Enabling system-wide voice control (optional)
+A ready-to-sideload debug APK is also kept at `.build-outputs/app-debug.apk`.
 
-To control other apps such as TikTok or YouTube Shorts with your voice:
+## Setup on your phone
 
-1. Open Voice Reels and tap the **Assistant** tab.
-2. Tap **Enable Voice Assistant** and turn on **Voice Reels** under
-   *Settings → Accessibility → Installed services*.
-3. Back in the Assistant tab, enable **System Background Listening**.
-4. (Optional) Enable the **Floating Controls Bubble** to get a draggable, always-on-top control
-   widget. This requires the "Display over other apps" permission.
-5. Open your favorite shorts app and use the voice commands above.
+Open Voice Reels and complete the three setup steps on the home screen:
 
-The Accessibility Service is used solely to dispatch swipe/tap gestures and to optionally mute the
-system recognition beeps. It does not read or store screen content
-(`onAccessibilityEvent` is intentionally a no-op).
+1. **Microphone access** — grant the mic permission.
+2. **Accessibility service** — tap to open *Settings → Accessibility → Voice Reels* and turn it on.
+   This is what lets the app scroll/tap inside other apps for you.
+3. **Background voice control** — flip the switch to start listening.
+
+Optional:
+
+- **Floating controls bubble** — a draggable, always-on-top widget with manual Prev/Next/Play/Like
+  buttons. Requires the "Display over other apps" permission.
+- **Silence recognition beeps** — mutes the system beeps that play when listening starts.
+
+Then open TikTok, Instagram Reels, Facebook Reels, or YouTube Shorts (the home screen has quick
+launch buttons) and use the voice commands.
+
+## Permissions
+
+| Permission | Why |
+| --- | --- |
+| `RECORD_AUDIO` | Capture spoken commands |
+| Accessibility service | Perform swipes/taps and read the foreground app for the Like action |
+| `SYSTEM_ALERT_WINDOW` | Optional floating controls bubble |
+| `INTERNET` | Some devices use network-based speech recognition |
 
 ## Project structure
 
 ```
 app/src/main/java/com/example/
-├── MainActivity.kt                     # Compose UI + in-app SpeechRecognizer wiring
-├── VoiceReelsViewModel.kt              # Feed state, command parsing, UI state flows
-├── ReelItem.kt                         # Reel data model + ReelType enum
-└── VoiceReelsAccessibilityService.kt   # System-wide gestures + floating overlay
+├── MainActivity.kt                     # Compose setup / control-center UI
+├── VoiceCommand.kt                     # Command enum + pure, unit-tested parser
+└── VoiceReelsAccessibilityService.kt   # Background listening, gestures, app-aware Like, overlay
 ```
+
+## Testing
+
+Unit tests cover the command parser (`VoiceCommandParserTest`) and basic app resources. Run them with:
+
+```bash
+./gradlew testDebugUnitTest
+```
+
+## Known limitations
+
+- Continuous background recognition uses battery; turn off background voice control when you're done.
+- Gesture targeting is coordinate-based for scroll/play and works across phones, but heavily
+  customized device skins or unusual layouts may need different swipe zones.
+- While Voice Reels is listening it holds the microphone, so apps that record audio at the same time
+  may conflict.
 
 ## Release builds
 
-The release build type expects signing credentials to be supplied via environment variables so that
-no secrets live in the repository:
+The release build type reads signing credentials from environment variables so no secrets live in
+the repo:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
