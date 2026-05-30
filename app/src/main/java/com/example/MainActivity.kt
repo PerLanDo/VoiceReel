@@ -278,8 +278,8 @@ private fun ControlCenter(
         )
         OptionToggle(
             title = "Lower video volume while listening",
-            description = "Ducks the video's audio so the mic hears you clearly over playback. " +
-                "Recommended for reliable voice control.",
+            description = "Requests audio focus and temporarily lowers media volume (extra dip " +
+                "while you speak) so loud reels do not drown out commands. Recommended.",
             checked = duckAudio,
             onCheckedChange = { checked ->
                 duckAudio = checked
