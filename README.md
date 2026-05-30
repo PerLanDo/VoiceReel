@@ -17,26 +17,32 @@ Everything runs **on-device**: there is no backend, no API key, and no account.
 | --- | --- |
 | "Next", "Down", "Skip", "Forward" | Scroll to the next video |
 | "Previous", "Back", "Up", "Last" | Scroll to the previous video |
-| "Play", "Pause", "Stop", "Resume" | Tap center to toggle playback |
+| "Play", "Resume", "Start" | **Resume** — only if the video is currently paused |
+| "Pause", "Stop", "Wait" | **Pause** — only if the video is currently playing |
 | "Like", "Love", "Heart", "Favorite" | Like the current video |
 
 Natural phrases work too — e.g. *"go to the next one"* or *"I love this"*.
 
-## Hearing you over the video & responding fast
+Play and Pause are **state-aware**: saying "pause" when the video is already paused (or "play" when
+it's already playing) does nothing, so they never accidentally toggle the wrong way.
 
-Recognizing speech while a loud video plays is the hard part. Voice Reels tackles it on three fronts:
+## Hearing you over the video, fast, without false repeats
+
+Recognizing speech while a loud video plays — and reacting cleanly — is the hard part. Voice Reels
+handles it on several fronts:
 
 - **Ducks the video audio while listening.** When voice control is on, Voice Reels holds transient
   audio focus so the foreground app lowers (ducks) its volume, letting the microphone pick up your
-  voice clearly. You can turn this off under *Listening & performance → Lower video volume while
-  listening*.
-- **Acts on partial results.** Commands fire the **instant** a matching word is detected in the
-  recognizer's partial output, instead of waiting for you to finish a sentence. Restart latency
-  between listening cycles is kept to a fraction of a second so it feels continuous.
-- **Sensitive, fuzzy matching.** The parser understands command synonyms, common mis-hearings
-  (e.g. *"necks"* → next, *"lake"* → like), and near-miss words via edit-distance matching — so a
-  word that merely *sounds like* a command still triggers immediately. It also prefers the fast,
-  network-free on-device recognition engine when available.
+  voice clearly. Toggle under *Listening & performance → Lower video volume while listening*.
+- **Acts on partial results.** Commands fire the **instant** a matching word is detected, instead of
+  waiting for you to finish a sentence, with sub-second restart latency between listening cycles.
+- **Sensitive, fuzzy matching.** The parser understands synonyms, common mis-hearings (e.g.
+  *"necks"* → next, *"lake"* → like), and near-miss words via edit-distance matching, and prefers
+  the fast on-device recognition engine.
+- **Repeat protection.** If a word is heard several times (because you repeated it), the **same**
+  command is rate-limited so the action only happens once. Choose the window under
+  *Listening & performance → Repeat protection* (1s / 2s / 3s, default **2s**). A *different* command
+  can still follow quickly, so "next" then "like" stays responsive.
 
 The system recognition "beep" can also be muted (*Listening & performance → Silence recognition
 beeps*).
@@ -48,7 +54,8 @@ beeps*).
   parser (`VoiceCommand.kt`) with synonym, homophone, and fuzzy matching.
 - The service dispatches the gesture for the active app:
   - **Next / Previous** → a vertical swipe (works the same across all four apps).
-  - **Play / Pause** → a single center tap.
+  - **Play / Pause** → a single center tap, but only when it would actually change the state
+    (detected via `AudioManager.isMusicActive()`).
   - **Like** → a center double-tap on TikTok / Instagram / Facebook (their standard "like" gesture).
     On **YouTube Shorts**, double-tap is used for seeking, so Voice Reels instead finds and clicks
     the real *Like* button via the accessibility node tree, falling back to a double-tap if it can't.
@@ -93,10 +100,10 @@ Open Voice Reels and complete the three setup steps on the home screen:
 
 Under **Listening & performance** you can fine-tune behavior:
 
+- **Repeat protection** — how long the same command is suppressed after firing (1s / 2s / 3s).
 - **Lower video volume while listening** (on by default) — ducks the video so your voice is heard.
 - **Silence recognition beeps** — mutes the system beeps that play when listening starts.
-- **Floating controls bubble** — a draggable, always-on-top widget with manual Prev/Next/Play/Like
-  buttons. Requires the "Display over other apps" permission.
+- **Floating controls bubble** — a draggable, always-on-top widget with manual buttons.
 
 Then open TikTok, Instagram Reels, Facebook Reels, or YouTube Shorts (the home screen has quick
 launch buttons) and use the voice commands.
@@ -116,7 +123,7 @@ launch buttons) and use the voice commands.
 app/src/main/java/com/example/
 ├── MainActivity.kt                     # Compose setup / control-center UI
 ├── VoiceCommand.kt                     # Command enum + pure, unit-tested parser (synonyms/fuzzy)
-└── VoiceReelsAccessibilityService.kt   # Background listening, audio ducking, gestures, overlay
+└── VoiceReelsAccessibilityService.kt   # Background listening, ducking, state-aware gestures, overlay
 ```
 
 ## Testing
@@ -131,6 +138,9 @@ cases) and basic app resources. Run them with:
 ## Known limitations
 
 - Continuous background recognition uses battery; turn off background voice control when you're done.
+- Play/Pause state detection relies on whether the app is emitting audio. If you watch with the
+  video **muted**, Voice Reels can't tell playing from paused, so it falls back to doing nothing for
+  the already-in-that-state case.
 - Audio ducking lowers the video volume while listening. Well-behaved apps duck rather than pause; if
   a particular app pauses instead, turn the option off.
 - Gesture targeting is coordinate-based for scroll/play and works across phones, but heavily
