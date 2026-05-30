@@ -449,7 +449,16 @@ private fun SetupStep(
 private fun SupportedApps() {
     val context = LocalContext.current
     val apps = listOf(
+<<<<<<< HEAD
+        AppEntry(
+            "TikTok",
+            VoiceReelsAccessibilityService.PKG_TIKTOK,
+            "https://www.tiktok.com",
+            VoiceReelsAccessibilityService.PKG_TIKTOK_ALT
+        ),
+=======
         AppEntry("TikTok", VoiceReelsAccessibilityService.PKG_TIKTOK, "https://www.tiktok.com", VoiceReelsAccessibilityService.PKG_TIKTOK_ALT),
+>>>>>>> origin/main
         AppEntry("YouTube", VoiceReelsAccessibilityService.PKG_YOUTUBE, "https://www.youtube.com/shorts"),
         AppEntry("Instagram", VoiceReelsAccessibilityService.PKG_INSTAGRAM, "https://www.instagram.com/reels"),
         AppEntry("Facebook", VoiceReelsAccessibilityService.PKG_FACEBOOK, "https://www.facebook.com/reels")
@@ -598,12 +607,52 @@ private fun switchColors() = SwitchDefaults.colors(
 private data class AppEntry(
     val name: String,
     val pkg: String,
+<<<<<<< HEAD
+    val launchUrl: String,
+=======
     val webUrl: String,
+>>>>>>> origin/main
     val altPkg: String? = null
 )
 
 private fun launchApp(context: Context, app: AppEntry) {
     val pm = context.packageManager
+<<<<<<< HEAD
+    val installedPkg = listOfNotNull(app.pkg, app.altPkg)
+        .firstOrNull { pkg -> pm.getLaunchIntentForPackage(pkg) != null }
+    val deepLinkIntent = Intent(Intent.ACTION_VIEW, Uri.parse(app.launchUrl)).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    }
+    runCatching {
+        val launched = when {
+            installedPkg != null -> {
+                val appIntent = Intent(deepLinkIntent).setPackage(installedPkg)
+                when {
+                    appIntent.resolveActivity(pm) != null -> {
+                        context.startActivity(appIntent)
+                        true
+                    }
+                    deepLinkIntent.resolveActivity(pm) != null -> {
+                        context.startActivity(deepLinkIntent)
+                        true
+                    }
+                    else -> pm.getLaunchIntentForPackage(installedPkg)?.let { launchIntent ->
+                        context.startActivity(launchIntent.apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                        true
+                    } ?: false
+                }
+            }
+            deepLinkIntent.resolveActivity(pm) != null -> {
+                context.startActivity(deepLinkIntent)
+                true
+            }
+            else -> false
+        }
+        if (!launched) {
+            error("Unable to open ${app.name}. Install/update the app and try again.")
+=======
     val intent = pm.getLaunchIntentForPackage(app.pkg)
         ?: app.altPkg?.let { pm.getLaunchIntentForPackage(it) }
     runCatching {
@@ -615,6 +664,7 @@ private fun launchApp(context: Context, app: AppEntry) {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
             )
+>>>>>>> origin/main
         }
     }.onFailure {
         Toast.makeText(context, "Could not open ${app.name}", Toast.LENGTH_SHORT).show()
