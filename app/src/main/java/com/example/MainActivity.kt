@@ -171,6 +171,9 @@ private fun ControlCenter(
     var overlay by remember {
         mutableStateOf(prefs.getBoolean("show_floating_overlay", false))
     }
+    var duckAudio by remember {
+        mutableStateOf(prefs.getBoolean("duck_media_audio", true))
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -255,7 +258,26 @@ private fun ControlCenter(
         SectionTitle("Voice commands")
         CommandReference()
 
-        SectionTitle("Options")
+        SectionTitle("Listening & performance")
+        OptionToggle(
+            title = "Lower video volume while listening",
+            description = "Ducks the video's audio so the mic hears you clearly over playback. " +
+                "Recommended for reliable voice control.",
+            checked = duckAudio,
+            onCheckedChange = { checked ->
+                duckAudio = checked
+                prefs.edit().putBoolean("duck_media_audio", checked).apply()
+            }
+        )
+        OptionToggle(
+            title = "Silence recognition beeps",
+            description = "Mute the system beeps that play when listening starts.",
+            checked = silenceBeeps,
+            onCheckedChange = { checked ->
+                silenceBeeps = checked
+                prefs.edit().putBoolean("mute_voice_beeps", checked).apply()
+            }
+        )
         OptionToggle(
             title = "Floating controls bubble",
             description = "Show a draggable on-top widget with manual buttons.",
@@ -268,15 +290,6 @@ private fun ControlCenter(
                     prefs.edit().putBoolean("show_floating_overlay", checked).apply()
                     VoiceReelsAccessibilityService.isOverlayEnabled = checked
                 }
-            }
-        )
-        OptionToggle(
-            title = "Silence recognition beeps",
-            description = "Mute the system beeps that play when listening starts.",
-            checked = silenceBeeps,
-            onCheckedChange = { checked ->
-                silenceBeeps = checked
-                prefs.edit().putBoolean("mute_voice_beeps", checked).apply()
             }
         )
 
@@ -444,6 +457,11 @@ private fun CommandReference() {
                     Text(desc, color = Muted, fontSize = 12.sp)
                 }
             }
+            Text(
+                "Tip: commands fire the instant a matching (or similar-sounding) word is heard.",
+                color = Muted,
+                fontSize = 11.sp
+            )
         }
     }
 }
