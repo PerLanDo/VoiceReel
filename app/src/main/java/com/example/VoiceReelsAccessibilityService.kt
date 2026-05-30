@@ -85,6 +85,10 @@ class WaveView(context: android.content.Context) : View(context) {
         }
     }
     
+    /**
+     * Sets the animation phase value. This is called by ObjectAnimator to update
+     * the wave animation. The phase value cycles from 0 to 360 degrees continuously.
+     */
     fun setPhase(value: Float) {
         phase = value % 360f
         invalidate()
@@ -97,7 +101,7 @@ class WaveView(context: android.content.Context) : View(context) {
         val maxRadius = minOf(width, height) / 2f - 4f
         
         // Draw multiple wave rings
-        for (i in 0..2) {
+        for (i in 0..WAVE_RING_COUNT - 1) {
             val radius = maxRadius * (0.3f + i * 0.25f)
             val alpha = (255 * (1f - i * 0.25f)).toInt()
             paint.alpha = alpha
@@ -144,6 +148,11 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
         /** Cap during active speech — near-mute so loud reel audio cannot mask commands. */
         private const val SPEECH_BURST_MAX_VOLUME = 1
+        
+        // Floating bubble animation and display constants
+        private const val WAVE_RING_COUNT = 3
+        private const val COMMAND_DISPLAY_DURATION_MS = 3000L
+        private const val COMMAND_POLL_INTERVAL_MS = 100L
 
         private var instance: VoiceReelsAccessibilityService? = null
 
@@ -221,6 +230,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var silenceSwitch: Switch? = null
     private var overlaySwitch: Switch? = null
     private var commandDisplayView: TextView? = null
+    private var commandUpdateRunnable: Runnable? = null
+    private var commandClearRunnable: Runnable? = null
 
     private val restartListeningRunnable = Runnable {
         if (isVoiceControlActive && _isRunning.value) startListening()
@@ -1071,25 +1082,43 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         val wm = windowManager ?: getSystemService(Context.WINDOW_SERVICE) as WindowManager
         if (panelView?.parent != null) runCatching { wm.removeView(panelView) }
         if (bubbleView?.parent != null) runCatching { wm.removeView(bubbleView) }
+        
+        // Clean up runnables to prevent memory leaks
+        commandUpdateRunnable?.let { handler.removeCallbacks(it) }
+        commandClearRunnable?.let { handler.removeCallbacks(it) }
+        commandUpdateRunnable = null
+        commandClearRunnable = null
     }
     
     private fun startCommandDisplayListener() {
         handler.post {
-            // Setup listener for command updates using observer pattern
+            // Cancel any existing listener
+            commandUpdateRunnable?.let { handler.removeCallbacks(it) }
+            
+            // Setup listener for command updates
             val commandUpdateRunnable = object : Runnable {
                 override fun run() {
                     val currentCommand = _lastCommand.value
                     if (currentCommand != null && currentCommand.isNotEmpty()) {
                         commandDisplayView?.text = currentCommand
-                        handler.postDelayed({
+                        
+                        // Cancel any pending clear runnable
+                        commandClearRunnable?.let { handler.removeCallbacks(it) }
+                        
+                        // Schedule new clear runnable
+                        val clearRunnable = Runnable {
                             if (commandDisplayView?.text == currentCommand) {
                                 commandDisplayView?.text = ""
                             }
-                        }, 3000)
+                        }
+                        commandClearRunnable = clearRunnable
+                        handler.postDelayed(clearRunnable, COMMAND_DISPLAY_DURATION_MS)
                     }
-                    handler.postDelayed(this, 100)
+                    // Re-schedule this runnable to continue polling
+                    handler.postDelayed(this, COMMAND_POLL_INTERVAL_MS)
                 }
             }
+            this@VoiceReelsAccessibilityService.commandUpdateRunnable = commandUpdateRunnable
             commandUpdateRunnable.run()
         }
     }
