@@ -80,6 +80,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         private const val RESTART_AFTER_RESULT_MS = 200L
         private const val RESTART_AFTER_ERROR_MS = 300L
         private const val RESTART_AFTER_BUSY_MS = 1000L
+        private const val LISTENING_WATCHDOG_CHECK_MS = 5000L
+        private const val LISTENING_STALE_TIMEOUT_MS = 15000L
 
         /** Fraction of the user's media volume while continuously listening. */
         private const val LISTENING_VOLUME_FRACTION = 0.18f
@@ -120,6 +122,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var recognizerIntent: Intent? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var lastRecognizerActivityAt = 0L
 
     private var currentPackage: String? = null
 
@@ -161,6 +164,29 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var listeningSwitch: Switch? = null
     private var silenceSwitch: Switch? = null
     private var overlaySwitch: Switch? = null
+
+    private val restartListeningRunnable = Runnable {
+        if (isVoiceControlActive && _isRunning.value) startListening()
+    }
+
+    private val listeningWatchdogRunnable = object : Runnable {
+        override fun run() {
+            if (!isVoiceControlActive || !_isRunning.value) return
+            val now = SystemClock.elapsedRealtime()
+            val stale = _isListening.value &&
+                lastRecognizerActivityAt > 0L &&
+                now - lastRecognizerActivityAt >= LISTENING_STALE_TIMEOUT_MS
+
+            if (stale) {
+                resetRecognizer()
+                _isListening.value = false
+                _status.value = "Refreshing microphone…"
+                startListening()
+                return
+            }
+            scheduleListeningWatchdog()
+        }
+    }
 
     private val preferenceListener =
         SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
@@ -220,6 +246,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             handler.post { startListening() }
             return
         }
+        handler.removeCallbacks(restartListeningRunnable)
+        if (_isListening.value) return
         val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (!hasMic) {
@@ -244,6 +272,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 recognizerIntent = buildRecognizerIntent()
             }
             utteranceConsumed = false
+            markRecognizerActivity()
+            scheduleListeningWatchdog()
             speechRecognizer?.startListening(recognizerIntent)
             _isListening.value = true
             _status.value = "Listening…"
@@ -287,13 +317,10 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             handler.post { stopListening() }
             return
         }
-        try {
-            speechRecognizer?.cancel()
-            speechRecognizer?.destroy()
-        } catch (e: Exception) {
-            // ignore
-        }
-        speechRecognizer = null
+        handler.removeCallbacks(restartListeningRunnable)
+        handler.removeCallbacks(listeningWatchdogRunnable)
+        lastRecognizerActivityAt = 0L
+        resetRecognizer()
         _isListening.value = false
         if (_isRunning.value) _status.value = "Paused"
         releaseAudioDucking()
@@ -302,13 +329,34 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     private fun scheduleRestart(delayMs: Long) {
         if (!isVoiceControlActive || !_isRunning.value) return
-        handler.postDelayed({
-            if (isVoiceControlActive && _isRunning.value) startListening()
-        }, delayMs)
+        handler.removeCallbacks(restartListeningRunnable)
+        handler.postDelayed(restartListeningRunnable, delayMs)
+    }
+
+    private fun scheduleListeningWatchdog() {
+        handler.removeCallbacks(listeningWatchdogRunnable)
+        if (isVoiceControlActive && _isRunning.value) {
+            handler.postDelayed(listeningWatchdogRunnable, LISTENING_WATCHDOG_CHECK_MS)
+        }
+    }
+
+    private fun markRecognizerActivity() {
+        lastRecognizerActivityAt = SystemClock.elapsedRealtime()
+    }
+
+    private fun resetRecognizer() {
+        try {
+            speechRecognizer?.cancel()
+            speechRecognizer?.destroy()
+        } catch (e: Exception) {
+            // ignore
+        }
+        speechRecognizer = null
     }
 
     private fun createSpeechListener(): RecognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
+            markRecognizerActivity()
             utteranceConsumed = false
             speechBurstAttenuation = false
             refreshMediaVolumeIsolation(deepDip = false)
@@ -316,12 +364,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         override fun onBeginningOfSpeech() {
+            markRecognizerActivity()
             speechBurstAttenuation = true
             refreshMediaVolumeIsolation(deepDip = true)
             _status.value = "Hearing you…"
         }
 
         override fun onRmsChanged(rmsdB: Float) {
+            markRecognizerActivity()
             // While the user is speaking, keep video audio ducked to the floor so dialog/SFX
             // in the reel does not drown out the command.
             if (speechBurstAttenuation && rmsdB > 2f) {
@@ -331,12 +381,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {
+            markRecognizerActivity()
             speechBurstAttenuation = false
             refreshMediaVolumeIsolation(deepDip = false)
             _status.value = "Processing…"
         }
 
         override fun onError(error: Int) {
+            markRecognizerActivity()
             _isListening.value = false
             val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                 RESTART_AFTER_BUSY_MS
@@ -347,10 +399,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
+            markRecognizerActivity()
             tryFireFrom(partialResults)
         }
 
         override fun onResults(results: Bundle?) {
+            markRecognizerActivity()
             if (!tryFireFrom(results)) {
                 val first = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
