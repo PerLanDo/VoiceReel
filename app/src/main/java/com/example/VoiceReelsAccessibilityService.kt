@@ -691,7 +691,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 text = "✕"
                 textSize = 14f
                 setTextColor(BUBBLE_CLOSE_TEXT_COLOR)
-                contentDescription = "Close floating bubble"
+                contentDescription = "Dismiss bubble"
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { dismissFloatingOverlay() }
