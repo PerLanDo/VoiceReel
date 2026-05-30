@@ -603,7 +603,7 @@ private fun switchColors() = SwitchDefaults.colors(
 private data class AppEntry(
     val name: String,
     val pkg: String,
-    val deepLinkUrl: String,
+    val launchUrl: String,
     val altPkg: String? = null
 )
 
@@ -611,7 +611,7 @@ private fun launchApp(context: Context, app: AppEntry) {
     val pm = context.packageManager
     val installedPkg = listOfNotNull(app.pkg, app.altPkg)
         .firstOrNull { pkg -> pm.getLaunchIntentForPackage(pkg) != null }
-    val deepLinkIntent = Intent(Intent.ACTION_VIEW, Uri.parse(app.deepLinkUrl)).apply {
+    val deepLinkIntent = Intent(Intent.ACTION_VIEW, Uri.parse(app.launchUrl)).apply {
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }
     runCatching {
