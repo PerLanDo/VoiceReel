@@ -39,9 +39,13 @@ handles it on several fronts:
   *Listening & performance → Lower video volume while listening*.
 - **Acts on partial results.** Commands fire the **instant** a matching word is detected, instead of
   waiting for you to finish a sentence, with sub-second restart latency between listening cycles.
-- **Sensitive, fuzzy matching.** The parser understands synonyms, common mis-hearings (e.g.
-  *"necks"* → next, *"lake"* → like), and near-miss words via edit-distance matching, and prefers
-  the fast on-device recognition engine.
+- **Sensitive, word-based matching.** The parser tokenizes what it heard and scans word by word,
+  so the command you said *first* wins and stray substrings never fire (e.g. *"stupid"* no longer
+  counts as *"up"*, *"background"* no longer counts as *"back"*). It understands synonyms, common
+  mis-hearings (e.g. *"necks"* → next, *"lake"* → like), and near-miss words via edit-distance
+  matching (guarded by a same-first-letter check to avoid look-alikes such as *"clay"* → play).
+- **Negation aware.** A negation right before a command word cancels it, so *"I don't like this"*
+  or *"don't skip"* do nothing instead of firing the wrong action.
 - **Repeat protection.** If a word is heard several times (because you repeated it), the **same**
   command is rate-limited so the action only happens once. Choose the window under
   *Listening & performance → Repeat protection* (1s / 2s / 3s, default **2s**). A *different* command
@@ -64,6 +68,8 @@ beeps*).
     the real *Like* button via the accessibility node tree, falling back to a double-tap if it can't.
 - It tracks only the **foreground package name** to pick the right Like strategy. It does not store
   screen content; the node tree is only read on demand when you say "like" in YouTube.
+- Matching is **word/position based** with negation handling, so accidental substrings and phrases
+  like "I don't like this" don't trigger an action.
 
 ## Requirements
 
@@ -150,8 +156,8 @@ cases) and basic app resources. Run them with:
   control off. If an app pauses instead of playing quietly, turn the option off.
 - Gesture targeting is coordinate-based for scroll/play and works across phones, but heavily
   customized device skins or unusual layouts may need different swipe zones.
-- Because matching is intentionally sensitive, an unrelated word that sounds like a command can
-  occasionally trigger an action.
+- Because matching is intentionally sensitive, an unrelated word that closely rhymes with a command
+  (and shares its first letter) can still occasionally trigger an action.
 - While Voice Reels is listening it holds the microphone, so apps that record audio at the same time
   may conflict.
 
