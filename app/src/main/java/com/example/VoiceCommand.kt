@@ -85,6 +85,19 @@ object VoiceCommandParser {
     // PAUSE command, so it is deliberately NOT treated as a negation.
     private val negations = setOf("dont", "not", "never", "no", "cannot", "cant", "wont", "stopped")
 
+    // Only these keywords take part in the fuzzy (edit-distance) fallback. Short, high-traffic
+    // command words are excluded because ordinary speech collides with them at distance 1
+    // ("want"→wait, "live"→love, "held"→hold, "list"→last, "step"→stop, "bark"→back), which would
+    // fire commands the user never gave. Distinctive words stay eligible so genuine mis-hearings
+    // ("skipp"→skip, "lik"→like, "pawse"→pause) are still caught.
+    private val fuzzyKeywords = setOf(
+        "skip", "forward", "advance",
+        "previous", "rewind", "backward", "before",
+        "like", "favorite", "favourite",
+        "resume", "continue", "unpause", "start",
+        "pause", "freeze"
+    )
+
     private const val NEGATION_WINDOW = 2
     private const val FUZZY_MIN_KEYWORD_LEN = 4
     private const val FUZZY_MIN_WORD_LEN = 3
@@ -165,6 +178,7 @@ object VoiceCommandParser {
             if (isNegated(tokens, index)) continue
             for (group in groups) {
                 for (keyword in group.keywords) {
+                    if (keyword !in fuzzyKeywords) continue
                     if (keyword.length < FUZZY_MIN_KEYWORD_LEN) continue
                     if (word[0] != keyword[0]) continue // guard: only near-misses that start alike
                     if (abs(keyword.length - word.length) > FUZZY_MAX_DISTANCE) continue
