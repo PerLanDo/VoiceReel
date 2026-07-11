@@ -83,4 +83,65 @@ class VoiceCommandParserTest {
     assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("NEXT"))
     assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("LiKe"))
   }
+
+  @Test
+  fun `innocent words containing a keyword as a substring do not fire`() {
+    // Historically these false-fired via substring matching.
+    listOf(
+      "background noise",
+      "please download this",
+      "such a playful video",
+      "adjust the display",
+      "check my stopwatch",
+      "the movie started",
+      "i want to unlike it",
+      "upload the file"
+    ).forEach {
+      assertEquals("'$it'", VoiceCommand.NONE, VoiceCommandParser.parse(it))
+    }
+  }
+
+  @Test
+  fun `negated commands are suppressed`() {
+    listOf(
+      "don't skip",
+      "do not skip this",
+      "no next",
+      "never go back",
+      "not now"
+    ).forEach {
+      assertEquals("'$it'", VoiceCommand.NONE, VoiceCommandParser.parse(it))
+    }
+  }
+
+  @Test
+  fun `stop still pauses and is not treated as a negation`() {
+    assertEquals(VoiceCommand.PAUSE, VoiceCommandParser.parse("stop"))
+    assertEquals(VoiceCommand.PAUSE, VoiceCommandParser.parse("please stop the video"))
+  }
+
+  @Test
+  fun `thumbs up phrase beats the up-to-previous interpretation`() {
+    assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("thumbs up"))
+    assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("give it a thumbs up"))
+  }
+
+  @Test
+  fun `additional synonyms map correctly`() {
+    assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("advance"))
+    assertEquals(VoiceCommand.PREVIOUS, VoiceCommandParser.parse("go backward"))
+    assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("fav this"))
+    assertEquals(VoiceCommand.PAUSE, VoiceCommandParser.parse("halt"))
+  }
+
+  @Test
+  fun `unpause resolves to play not pause`() {
+    assertEquals(VoiceCommand.PLAY, VoiceCommandParser.parse("unpause"))
+  }
+
+  @Test
+  fun `scroll down and swipe down map to NEXT`() {
+    assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("scroll down"))
+    assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("swipe down please"))
+  }
 }
