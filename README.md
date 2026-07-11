@@ -39,9 +39,12 @@ handles it on several fronts:
   *Listening & performance → Lower video volume while listening*.
 - **Acts on partial results.** Commands fire the **instant** a matching word is detected, instead of
   waiting for you to finish a sentence, with sub-second restart latency between listening cycles.
-- **Sensitive, fuzzy matching.** The parser understands synonyms, common mis-hearings (e.g.
+- **Sensitive but accurate matching.** The parser understands synonyms, common mis-hearings (e.g.
   *"necks"* → next, *"lake"* → like), and near-miss words via edit-distance matching, and prefers
-  the fast on-device recognition engine.
+  the fast on-device recognition engine. It matches on **whole words** (so *"background"*,
+  *"download"*, *"playful"*, *"stopwatch"* and *"unlike"* no longer accidentally trigger),
+  honors **negations** (*"don't skip"*, *"not now"* do nothing), and lets multi-word phrases win
+  over single words (*"thumbs up"* → like, not *"up"* → previous).
 - **Repeat protection.** If a word is heard several times (because you repeated it), the **same**
   command is rate-limited so the action only happens once. Choose the window under
   *Listening & performance → Repeat protection* (1s / 2s / 3s, default **2s**). A *different* command
@@ -111,11 +114,7 @@ Under **Listening & performance** you can fine-tune behavior:
   **Floating bubble** off to hide the widget entirely.
 
 Then open TikTok, Instagram Reels, Facebook Reels, or YouTube Shorts (the home screen has quick
-<<<<<<< HEAD
 launch buttons that deep-link to short-video feeds when possible) and use the voice commands.
-=======
-launch buttons) and use the voice commands.
->>>>>>> origin/main
 
 ## Permissions
 
