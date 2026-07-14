@@ -80,13 +80,10 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         private const val RESTART_AFTER_RESULT_MS = 200L
         private const val RESTART_AFTER_ERROR_MS = 300L
         private const val RESTART_AFTER_BUSY_MS = 1000L
-<<<<<<< HEAD
         private const val BUBBLE_CLOSE_HIT_AREA_DP = 28
         private const val BUBBLE_CLOSE_TEXT_COLOR = 0xFF94A3B8.toInt()
-=======
         private const val LISTENING_WATCHDOG_CHECK_MS = 5000L
         private const val LISTENING_STALE_TIMEOUT_MS = 15000L
->>>>>>> origin/main
 
         /** Fraction of the user's media volume while continuously listening. */
         private const val LISTENING_VOLUME_FRACTION = 0.18f
@@ -127,10 +124,7 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var recognizerIntent: Intent? = null
     private val handler = Handler(Looper.getMainLooper())
-<<<<<<< HEAD
-=======
     private var lastRecognizerActivityAt = 0L
->>>>>>> origin/main
 
     private var currentPackage: String? = null
 
@@ -173,8 +167,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
     private var silenceSwitch: Switch? = null
     private var overlaySwitch: Switch? = null
 
-<<<<<<< HEAD
-=======
     private val restartListeningRunnable = Runnable {
         if (isVoiceControlActive && _isRunning.value) startListening()
     }
@@ -192,13 +184,13 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 _isListening.value = false
                 _status.value = "Refreshing microphone…"
                 startListening()
+                scheduleListeningWatchdog()
                 return
             }
             scheduleListeningWatchdog()
         }
     }
 
->>>>>>> origin/main
     private val preferenceListener =
         SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
             when (key) {
@@ -211,6 +203,20 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                     val enabled = sharedPreferences.getBoolean(key, false)
                     if (isOverlayEnabled != enabled) isOverlayEnabled = enabled
                     handler.post { overlaySwitch?.isChecked = enabled }
+                }
+                "duck_media_audio" -> {
+                    if (!sharedPreferences.getBoolean(key, true)) {
+                        handler.post { releaseAudioDucking() }
+                    } else if (isVoiceControlActive && _isRunning.value) {
+                        handler.post { acquireAudioDucking() }
+                    }
+                }
+                "mute_voice_beeps" -> {
+                    if (!sharedPreferences.getBoolean(key, true)) {
+                        handler.post { restoreSystemSounds() }
+                    } else if (isVoiceControlActive && _isListening.value) {
+                        handler.post { muteSystemSoundsIfRequested() }
+                    }
                 }
             }
         }
@@ -257,19 +263,18 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             handler.post { startListening() }
             return
         }
-<<<<<<< HEAD
-=======
         handler.removeCallbacks(restartListeningRunnable)
         if (_isListening.value) return
->>>>>>> origin/main
         val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (!hasMic) {
             _status.value = "Microphone permission needed"
+            scheduleRestart(RESTART_AFTER_BUSY_MS)
             return
         }
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             _status.value = "No speech engine on this device"
+            scheduleRestart(RESTART_AFTER_BUSY_MS)
             return
         }
 
@@ -286,11 +291,8 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 recognizerIntent = buildRecognizerIntent()
             }
             utteranceConsumed = false
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
             scheduleListeningWatchdog()
->>>>>>> origin/main
             speechRecognizer?.startListening(recognizerIntent)
             _isListening.value = true
             _status.value = "Listening…"
@@ -334,20 +336,10 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             handler.post { stopListening() }
             return
         }
-<<<<<<< HEAD
-        try {
-            speechRecognizer?.cancel()
-            speechRecognizer?.destroy()
-        } catch (e: Exception) {
-            // ignore
-        }
-        speechRecognizer = null
-=======
         handler.removeCallbacks(restartListeningRunnable)
         handler.removeCallbacks(listeningWatchdogRunnable)
         lastRecognizerActivityAt = 0L
         resetRecognizer()
->>>>>>> origin/main
         _isListening.value = false
         if (_isRunning.value) _status.value = "Paused"
         releaseAudioDucking()
@@ -356,11 +348,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
     private fun scheduleRestart(delayMs: Long) {
         if (!isVoiceControlActive || !_isRunning.value) return
-<<<<<<< HEAD
-        handler.postDelayed({
-            if (isVoiceControlActive && _isRunning.value) startListening()
-        }, delayMs)
-=======
         handler.removeCallbacks(restartListeningRunnable)
         handler.postDelayed(restartListeningRunnable, delayMs)
     }
@@ -384,15 +371,11 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
             // ignore
         }
         speechRecognizer = null
->>>>>>> origin/main
     }
 
     private fun createSpeechListener(): RecognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             utteranceConsumed = false
             speechBurstAttenuation = false
             refreshMediaVolumeIsolation(deepDip = false)
@@ -400,20 +383,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         override fun onBeginningOfSpeech() {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             speechBurstAttenuation = true
             refreshMediaVolumeIsolation(deepDip = true)
             _status.value = "Hearing you…"
         }
 
         override fun onRmsChanged(rmsdB: Float) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             // While the user is speaking, keep video audio ducked to the floor so dialog/SFX
             // in the reel does not drown out the command.
             if (speechBurstAttenuation && rmsdB > 2f) {
@@ -423,20 +400,14 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
 
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             speechBurstAttenuation = false
             refreshMediaVolumeIsolation(deepDip = false)
             _status.value = "Processing…"
         }
 
         override fun onError(error: Int) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             _isListening.value = false
             val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                 RESTART_AFTER_BUSY_MS
@@ -447,18 +418,12 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             tryFireFrom(partialResults)
         }
 
         override fun onResults(results: Bundle?) {
-<<<<<<< HEAD
-=======
             markRecognizerActivity()
->>>>>>> origin/main
             if (!tryFireFrom(results)) {
                 val first = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -793,12 +758,11 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                 textSize = 20f
                 gravity = Gravity.CENTER
             })
-<<<<<<< HEAD
             container.addView(TextView(context).apply {
                 text = "✕"
                 textSize = 14f
                 setTextColor(BUBBLE_CLOSE_TEXT_COLOR)
-                contentDescription = "Dismiss bubble"
+                contentDescription = "Close floating bubble"
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { dismissFloatingOverlay() }
@@ -812,8 +776,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                     Gravity.TOP or Gravity.END
                 )
             })
-=======
->>>>>>> origin/main
             container.setOnTouchListener(object : View.OnTouchListener {
                 private var initialX = 0
                 private var initialY = 0
@@ -846,7 +808,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                             return true
                         }
                         MotionEvent.ACTION_UP -> {
-<<<<<<< HEAD
                             if (!dragging) {
                                 val closeArea = dp(BUBBLE_CLOSE_HIT_AREA_DP)
                                 val location = IntArray(2)
@@ -860,9 +821,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
                                     toggleControlPanel()
                                 }
                             }
-=======
-                            if (!dragging) toggleControlPanel()
->>>>>>> origin/main
                             return true
                         }
                     }
@@ -940,7 +898,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         }
     }
 
-<<<<<<< HEAD
     private fun dismissFloatingOverlay() {
         prefs().edit().putBoolean("show_floating_overlay", false).apply()
         isOverlayEnabled = false
@@ -948,8 +905,6 @@ class VoiceReelsAccessibilityService : AccessibilityService() {
         hideFloatingViews()
     }
 
-=======
->>>>>>> origin/main
     private fun divider(): View = View(this).apply {
         setBackgroundColor(0xFF334155.toInt())
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {

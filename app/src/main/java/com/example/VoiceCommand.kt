@@ -90,7 +90,7 @@ object VoiceCommandParser {
     private fun exactMatch(text: String): VoiceCommand? {
         val words = tokens(text)
         for (group in groups) {
-            if (group.keywords.any { it in words || text.contains(it) }) return group.command
+            if (group.keywords.any { it in words }) return group.command
         }
         for (word in words) {
             homophones[word]?.let { return it }
