@@ -83,4 +83,11 @@ class VoiceCommandParserTest {
     assertEquals(VoiceCommand.NEXT, VoiceCommandParser.parse("NEXT"))
     assertEquals(VoiceCommand.LIKE, VoiceCommandParser.parse("LiKe"))
   }
+
+  @Test
+  fun `substring false positives do not trigger commands`() {
+    listOf("replay", "explain", "feedback", "nonstop").forEach {
+      assertEquals("'$it'", VoiceCommand.NONE, VoiceCommandParser.parse(it))
+    }
+  }
 }
